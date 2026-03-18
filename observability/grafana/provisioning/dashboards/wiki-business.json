@@ -1,0 +1,69 @@
+{
+  "uid": "wiki-business",
+  "title": "Wikipedia - Web & Business",
+  "tags": ["wikipedia", "business", "api", "newsroom"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total news",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "wiki_news_total"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Live stories",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "wiki_live_news_total"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Latest news age (min)",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "wiki_latest_news_age_minutes"}],
+      "fieldConfig": {"defaults": {"unit": "m", "decimals": 1}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per endpoint",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (path, method) (rate(newsroom_http_requests_total[5m]))", "legendFormat": "{{method}} {{path}}"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 API Latency (s)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(newsroom_http_request_duration_seconds_bucket[5m])) by (le, path))", "legendFormat": "{{path}}"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Wikipedia Events (Raw)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "wiki_raw_events_total", "legendFormat": "bronze raw total"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Cumulative Processed News",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "B", "expr": "wiki_news_total", "legendFormat": "news total"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}}
+    }
+  ]
+}

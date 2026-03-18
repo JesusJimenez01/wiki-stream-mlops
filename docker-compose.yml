@@ -1,0 +1,592 @@
+# ============================================================
+# Wikipedia — Docker Compose (Phases 0-6)
+# ============================================================
+# Deploys: Redpanda, Producer, Spark (master+worker+bronze/silver/gold/serving),
+#          MinIO, MongoDB, Ollama, Newsroom API, Prometheus, Grafana
+# Usage:   docker compose up -d
+# ============================================================
+
+# ── Shared Spark Image (base + Kafka/Delta/S3A JARs) ──
+x-spark-image: &spark-image
+  image: wiki-spark:latest
+  build:
+    context: ./spark-jobs
+    dockerfile: Dockerfile
+
+services:
+
+  # --------------------------------------------------------
+  # NEWSROOM API — News Web + API + /metrics
+  # --------------------------------------------------------
+  newsroom-api:
+    build:
+      context: .
+      dockerfile: newsroom-api/Dockerfile
+    container_name: wiki-newsroom-api
+    environment:
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME:-wikipedia}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD:-wikipedia123}
+      - MONGO_DATABASE=${MONGO_DATABASE:-wikipedia}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-news}
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+    ports:
+      - "${NEWSROOM_API_PORT:-8085}:8085"
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # PROMETHEUS — Stack Metrics Scraping
+  # --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wiki-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    depends_on:
+      newsroom-api:
+        condition: service_started
+      node-exporter:
+        condition: service_started
+      cadvisor:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # GRAFANA — Observability Dashboard (Phase 6)
+  # --------------------------------------------------------
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: wiki-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin123}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # REDPANDA — Messaging Broker (Kafka-compatible)
+  # --------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: wiki-redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 2G
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+    ports:
+      - "${REDPANDA_EXTERNAL_PORT:-19092}:19092"   # Kafka API (external)
+      - "18082:18082"                               # Pandaproxy
+      - "18081:18081"                               # Schema Registry
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"         # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # NODE EXPORTER — Docker host CPU/RAM/system
+  # --------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: wiki-node-exporter
+    command:
+      - "--path.rootfs=/host"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)"
+    ports:
+      - "${NODE_EXPORTER_PORT:-9100}:9100"
+    volumes:
+      - /:/host:ro
+    pid: host
+    restart: unless-stopped
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # CADVISOR — CPU/RAM/network per container
+  # --------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: wiki-cadvisor
+    ports:
+      - "${CADVISOR_PORT:-8088}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    privileged: true
+    restart: unless-stopped
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # DCGM EXPORTER — NVIDIA Telemetry (GPU/VRAM)
+  # --------------------------------------------------------
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.5.2-4.8.1-ubuntu22.04
+    container_name: wiki-dcgm-exporter
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - "${DCGM_EXPORTER_PORT:-9400}:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # REDPANDA CONSOLE — Topic management UI
+  # --------------------------------------------------------
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.5.2
+    container_name: wiki-redpanda-console
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - KAFKA_SCHEMAREGISTRY_ENABLED=true
+      - KAFKA_SCHEMAREGISTRY_URLS=http://redpanda:8081
+    ports:
+      - "8888:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # PRODUCER — Wikipedia SSE -> Redpanda
+  # --------------------------------------------------------
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: wiki-producer
+    environment:
+      - REDPANDA_BROKER=${REDPANDA_BROKER:-redpanda:9092}
+      - KAFKA_TOPIC_RAW=${KAFKA_TOPIC_RAW:-wiki-raw}
+      - WIKI_SSE_URL=${WIKI_SSE_URL:-https://stream.wikimedia.org/v2/stream/recentchange}
+      - WIKI_USER_AGENT=${WIKI_USER_AGENT:-wikipedia-producer/1.0 (https://wikipedia.local; classroom@local)}
+      - PRODUCER_RECONNECT_DELAY=${PRODUCER_RECONNECT_DELAY:-5}
+      - PRODUCER_LOG_EVERY_N=${PRODUCER_LOG_EVERY_N:-100}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK MASTER
+  # --------------------------------------------------------
+  spark-master:
+    <<: *spark-image
+    container_name: wiki-spark-master
+    command: /opt/spark/sbin/start-master.sh
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_MASTER_OPTS=-Dspark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet -Dspark.metrics.conf.master.sink.prometheusServlet.path=/metrics/master/prometheus/ -Dspark.metrics.conf.applications.sink.prometheusServlet.path=/metrics/applications/prometheus/ -Dspark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+    ports:
+      - "${SPARK_MASTER_WEBUI_PORT:-8080}:8080"   # Web UI
+      - "${SPARK_MASTER_PORT:-7077}:7077"          # Master port
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK WORKER
+  # --------------------------------------------------------
+  spark-worker:
+    <<: *spark-image
+    container_name: wiki-spark-worker
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+    environment:
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-8G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-4}
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_OPTS=-Dspark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet -Dspark.metrics.conf.worker.sink.prometheusServlet.path=/metrics/prometheus/ -Dspark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+    ports:
+      - "${SPARK_WORKER_WEBUI_PORT:-8081}:8081"
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK BRONZE — Structured Streaming (Phase 2)
+  # --------------------------------------------------------
+  spark-bronze:
+    <<: *spark-image
+    container_name: wiki-spark-bronze
+    command: >
+      /opt/spark/bin/spark-submit
+        --master spark://spark-master:7077
+        --deploy-mode client
+        --name WikiBronzeIngestion
+        --conf spark.driver.host=spark-bronze
+        --conf spark.driver.bindAddress=0.0.0.0
+        --conf spark.ui.prometheus.enabled=true
+        --conf spark.sql.streaming.metricsEnabled=true
+        --conf spark.executor.processTreeMetrics.enabled=true
+        --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
+        --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
+        --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+        --conf spark.cores.max=2
+        --conf spark.executor.instances=1
+        --conf spark.executor.memory=4g
+        --conf spark.executor.cores=2
+        /opt/spark-jobs/bronze_ingestion.py
+    environment:
+      - REDPANDA_BROKER=${REDPANDA_BROKER:-redpanda:9092}
+      - KAFKA_TOPIC_RAW=${KAFKA_TOPIC_RAW:-wiki-raw}
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    expose:
+      - "4040"
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      producer:
+        condition: service_started
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK SILVER — Cleaning and filtering (Phase 3)
+  # --------------------------------------------------------
+  spark-silver:
+    <<: *spark-image
+    container_name: wiki-spark-silver
+    command: >
+      /opt/spark/bin/spark-submit
+        --master spark://spark-master:7077
+        --deploy-mode client
+        --name WikiSilverProcessing
+        --conf spark.driver.host=spark-silver
+        --conf spark.driver.bindAddress=0.0.0.0
+        --conf spark.ui.prometheus.enabled=true
+        --conf spark.sql.streaming.metricsEnabled=true
+        --conf spark.executor.processTreeMetrics.enabled=true
+        --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
+        --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
+        --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+        --conf spark.cores.max=1
+        --conf spark.executor.instances=1
+        --conf spark.executor.memory=2g
+        --conf spark.executor.cores=1
+        /opt/spark-jobs/silver_processing.py
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+      - SILVER_TRIGGER_INTERVAL=${SILVER_TRIGGER_INTERVAL:-30 seconds}
+      - SILVER_REVERT_SIGNAL_REGEX=${SILVER_REVERT_SIGNAL_REGEX:-.*\b(undid revision|revert(?:ed|ing)? .*edit(?:s)? by)\b.*}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+      - ./tests:/opt/tests
+    expose:
+      - "4040"
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      spark-bronze:
+        condition: service_started
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK GOLD — AI Enrichment with Ollama (Phase 4)
+  # --------------------------------------------------------
+  spark-gold:
+    <<: *spark-image
+    container_name: wiki-spark-gold
+    command: >
+      /opt/spark/bin/spark-submit
+        --master spark://spark-master:7077
+        --deploy-mode client
+        --name WikiGoldEnrichment
+        --conf spark.driver.host=spark-gold
+        --conf spark.driver.bindAddress=0.0.0.0
+        --conf spark.ui.prometheus.enabled=true
+        --conf spark.sql.streaming.metricsEnabled=true
+        --conf spark.executor.processTreeMetrics.enabled=true
+        --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
+        --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
+        --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+        --conf spark.cores.max=1
+        --conf spark.executor.instances=1
+        --conf spark.executor.memory=2g
+        --conf spark.executor.cores=1
+        /opt/spark-jobs/gold_enrichment.py
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:8b}
+      - OLLAMA_TIMEOUT_SECONDS=${OLLAMA_TIMEOUT_SECONDS:-60}
+      - GOLD_TRIGGER_INTERVAL=${GOLD_TRIGGER_INTERVAL:-30 seconds}
+      - GOLD_STARTING_VERSION=${GOLD_STARTING_VERSION:-latest}
+      - GOLD_MAX_EVENTS_PER_BATCH=${GOLD_MAX_EVENTS_PER_BATCH:-20}
+      - GOLD_TOKEN_MIN_LEN=${GOLD_TOKEN_MIN_LEN:-4}
+      - GOLD_TOPIC_STOPWORDS=${GOLD_TOPIC_STOPWORDS:-wikipedia,wikidata,wikimedia,commons,article,file,edit,updated,update,category,page,using,added,user,minor,bot,with,from,that,this,para,como,donde,sobre,con,from,the,and,for,are,was,you,your,http,https,www,wiki,batch,short,removed,quickstatements,wbeditentity,toollabs,property,create}
+      - GOLD_DEDUP_LOOKBACK_HOURS=${GOLD_DEDUP_LOOKBACK_HOURS:-6}
+      - GOLD_DEDUP_MAX_CANDIDATES=${GOLD_DEDUP_MAX_CANDIDATES:-400}
+      - GOLD_HEADLINE_SIM_THRESHOLD=${GOLD_HEADLINE_SIM_THRESHOLD:-0.92}
+      - GOLD_SUMMARY_SIM_THRESHOLD=${GOLD_SUMMARY_SIM_THRESHOLD:-0.90}
+      - GOLD_TOKEN_JACCARD_THRESHOLD=${GOLD_TOKEN_JACCARD_THRESHOLD:-0.82}
+      - GOLD_MIN_UPDATE_INTERVAL_MINUTES=${GOLD_MIN_UPDATE_INTERVAL_MINUTES:-45}
+      - GOLD_MIN_TOPIC_COUNT_DELTA=${GOLD_MIN_TOPIC_COUNT_DELTA:-5}
+      - GOLD_STORY_STALE_HOURS=${GOLD_STORY_STALE_HOURS:-12}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+      - ./tests:/opt/tests
+    expose:
+      - "4040"
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      spark-silver:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SPARK SERVING — Gold -> MongoDB (Phase 5)
+  # --------------------------------------------------------
+  spark-serving:
+    <<: *spark-image
+    container_name: wiki-spark-serving
+    command: >
+      /opt/spark/bin/spark-submit
+        --master local[1]
+        --deploy-mode client
+        --name WikiMongoServing
+        --conf spark.ui.prometheus.enabled=true
+        --conf spark.executor.processTreeMetrics.enabled=true
+        --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet
+        --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus
+        --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
+        /opt/spark-jobs/mongo_serving.py
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME:-wikipedia}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD:-wikipedia123}
+      - MONGO_DATABASE=${MONGO_DATABASE:-wikipedia}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-news}
+      - SERVING_TRIGGER_INTERVAL=${SERVING_TRIGGER_INTERVAL:-30 seconds}
+      - SERVING_STARTING_VERSION=${SERVING_STARTING_VERSION:-latest}
+      - SERVING_BATCH_LIMIT=${SERVING_BATCH_LIMIT:-200}
+      - SERVING_BOOTSTRAP_ENABLED=${SERVING_BOOTSTRAP_ENABLED:-true}
+      - SERVING_BOOTSTRAP_MAX_RECORDS=${SERVING_BOOTSTRAP_MAX_RECORDS:-5000}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    expose:
+      - "4040"
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      spark-gold:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # MINIO — S3-compatible Storage (Lakehouse)
+  # --------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: wiki-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"        # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # MINIO INIT — Creates the "lakehouse" bucket on startup
+  # --------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: wiki-minio-init
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+      mc mb --ignore-existing myminio/$${MINIO_BUCKET};
+      mc anonymous set download myminio/$${MINIO_BUCKET};
+      echo 'Bucket $${MINIO_BUCKET} ready.';
+      exit 0;
+      "
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
+      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # MONGODB — Document Database (Serving)
+  # --------------------------------------------------------
+  mongodb:
+    image: mongo:7
+    container_name: wiki-mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME:-wikipedia}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD:-wikipedia123}
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # OLLAMA — AI Inference Engine (GPU)
+  # --------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: wiki-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wiki-net
+
+# ============================================================
+# NETWORKS
+# ============================================================
+networks:
+  wiki-net:
+    driver: bridge
+    name: wiki-net
+
+# ============================================================
+# PERSISTENT VOLUMES
+# ============================================================
+volumes:
+  redpanda_data:
+  minio_data:
+  mongo_data:
+  ollama_models:
+  prometheus_data:
+  grafana_data:

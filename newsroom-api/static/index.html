@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WIKIPEDIA</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=UnifrakturMaguntia&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="newspaper">
+        <header class="masthead">
+            <div class="masthead-row-top">
+                <span class="masthead-side" id="date-display"></span>
+                <span class="masthead-side right-side">Price: Public Domain</span>
+            </div>
+            <div class="masthead-title-row">
+                <div class="rule rule-double"></div>
+                <h1 class="masthead-logo" onclick="App.navigate('portada')">Wikipedia</h1>
+                <p class="masthead-subtitle">The free encyclopedia &mdash; Print edition of human knowledge</p>
+                <div class="rule rule-double"></div>
+            </div>
+            <nav class="tab-bar" id="tab-bar">
+                <a href="#" class="tab active" data-tab="portada">Front Page</a>
+                <a href="#" class="tab" data-tab="ultima-hora">Latest News</a>
+                <a href="#" class="tab" data-tab="en-vivo">Live</a>
+                <a href="#" class="tab" data-tab="top-topic" id="dynamic-topic-tab">Trending</a>
+                <span class="tab-spacer"></span>
+                <a href="http://localhost:3000" target="_blank" class="tab tab-external" title="Panel de Observabilidad (Grafana)">&#9881; Observability</a>
+            </nav>
+        </header>
+
+        <div class="ticker" id="ticker">
+            <strong>BREAKING:</strong> <span id="ticker-text">Loading telegraphic dispatches&hellip;</span>
+        </div>
+
+        <main class="content" id="main-content">
+            <div class="loader">Composing typographic plates&hellip;</div>
+        </main>
+
+        <footer class="site-footer">
+            <div class="rule rule-thick"></div>
+            <p><strong>WIKIPEDIA</strong> &mdash; Automatically generated from Wikimedia real-time events.<br>
+            Pipeline: RedPanda &rarr; Spark (Medallion) &rarr; MongoDB &rarr; FastAPI
+            | <a href="http://localhost:3000" target="_blank">Observability in Grafana</a></p>
+        </footer>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

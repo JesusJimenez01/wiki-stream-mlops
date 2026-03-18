@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- ============================================================
+       Dependency Resolution — Wikipedia Spark Pipeline
+       ============================================================
+       This POM does NOT compile anything. It is only used for Maven
+       to resolve the entire tree of transitive dependencies
+       and copy them to a directory via the goal
+       dependency:copy-dependencies.
+
+       Libraries that already come in the apache/spark image
+       are excluded to avoid version conflicts.
+       ============================================================ -->
+
+  <groupId>dev.wiki</groupId>
+  <artifactId>spark-deps</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+
+  <properties>
+    <spark.version>3.5.4</spark.version>
+    <scala.binary.version>2.12</scala.binary.version>
+    <delta.version>3.2.0</delta.version>
+    <hadoop.version>3.3.4</hadoop.version>
+  </properties>
+
+  <dependencies>
+
+    <!-- ── Kafka Structured Streaming connector ────────────── -->
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql-kafka-0-10_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+
+    <!-- ── Delta Lake ──────────────────────────────────────── -->
+    <dependency>
+      <groupId>io.delta</groupId>
+      <artifactId>delta-spark_${scala.binary.version}</artifactId>
+      <version>${delta.version}</version>
+    </dependency>
+
+    <!-- ── S3A filesystem (MinIO) ──────────────────────────── -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-aws</artifactId>
+      <version>${hadoop.version}</version>
+    </dependency>
+
+
+  </dependencies>
+</project>

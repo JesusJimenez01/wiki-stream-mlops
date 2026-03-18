@@ -1,0 +1,2 @@
+confluent-kafka==2.6.1
+requests-sse==0.5.2
