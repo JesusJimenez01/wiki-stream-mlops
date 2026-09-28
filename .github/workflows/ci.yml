@@ -24,8 +24,12 @@ jobs:
       - run: python -m pip install "ruff>=0.6"
       - run: ruff check .
       - run: ruff format --check .
-      - name: Validate docker-compose.yml
-        run: cp .env.example .env && docker compose config --quiet
+      - name: Validate docker-compose.yml and its overrides
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.desktop.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.desktop.yml -f docker-compose.cpu.yml config --quiet
 
   unit:
     name: Unit tests
