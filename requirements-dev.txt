@@ -1,0 +1,10 @@
+# Test and lint dependencies (CI and local development).
+# Service runtimes are pinned in each service's own requirements.txt / Dockerfile.
+-r newsroom-api/requirements.txt
+-r producer/requirements.txt
+pymongo==4.10.1
+pyspark==3.5.4
+delta-spark==3.2.0
+pytest>=8.0
+httpx>=0.27
+ruff>=0.6
