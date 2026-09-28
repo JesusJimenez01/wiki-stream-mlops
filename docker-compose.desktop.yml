@@ -1,0 +1,22 @@
+# ============================================================
+# Overrides for Docker Desktop (Windows with WSL 2, macOS)
+# ============================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
+#
+# - cAdvisor: Docker Desktop's VM has no /dev/disk, so that bind mount is dropped
+#   (per-container CPU/RAM/network metrics keep working).
+# - DCGM exporter: NVIDIA DCGM is not supported on WSL 2, so GPU telemetry is
+#   disabled. Ollama still uses the GPU.
+# ============================================================
+
+services:
+  cadvisor:
+    volumes: !override
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+
+  dcgm-exporter:
+    profiles: ["gpu-telemetry"]

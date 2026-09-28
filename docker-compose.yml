@@ -292,7 +292,7 @@ services:
         --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
         --conf spark.cores.max=2
         --conf spark.executor.instances=1
-        --conf spark.executor.memory=4g
+        --conf spark.executor.memory=${BRONZE_EXECUTOR_MEMORY:-4g}
         --conf spark.executor.cores=2
         /opt/spark-jobs/bronze_ingestion.py
     environment:
@@ -340,7 +340,7 @@ services:
         --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
         --conf spark.cores.max=1
         --conf spark.executor.instances=1
-        --conf spark.executor.memory=2g
+        --conf spark.executor.memory=${SILVER_EXECUTOR_MEMORY:-2g}
         --conf spark.executor.cores=1
         /opt/spark-jobs/silver_processing.py
     environment:
@@ -387,7 +387,7 @@ services:
         --conf spark.metrics.conf.*.source.jvm.class=org.apache.spark.metrics.source.JvmSource
         --conf spark.cores.max=1
         --conf spark.executor.instances=1
-        --conf spark.executor.memory=2g
+        --conf spark.executor.memory=${GOLD_EXECUTOR_MEMORY:-2g}
         --conf spark.executor.cores=1
         /opt/spark-jobs/gold_enrichment.py
     environment:

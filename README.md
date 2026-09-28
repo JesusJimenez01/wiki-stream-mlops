@@ -116,10 +116,12 @@ flowchart LR
 
 ### 4.0 Prerequisites
 
-* Docker with Docker Compose v2.
-* An NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
-  (used by Ollama and the DCGM exporter).
-* About 16 GB of RAM for the full stack (the Spark worker is configured with 8 GB).
+* Docker with Docker Compose v2.24+ (Linux) or Docker Desktop (Windows with WSL 2, macOS).
+* Recommended: an NVIDIA GPU for Ollama. On Linux install the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/);
+  Docker Desktop on Windows only needs the regular NVIDIA driver. Without a GPU, see 4.4.
+* RAM: 32 GB is comfortable with the defaults. On 16 GB, lower the Spark memory in `.env`
+  (`SPARK_WORKER_MEMORY=4G`, `BRONZE_EXECUTOR_MEMORY=2g`, `SILVER_EXECUTOR_MEMORY=1g`, `GOLD_EXECUTOR_MEMORY=1g`).
 
 > The credentials in `.env.example` are local development defaults. Change them before exposing
 > any port beyond your machine.
@@ -165,6 +167,25 @@ docker compose up -d --build
 ```
 
 This reset **does not** delete the `*_ollama_models` volume.
+
+### 4.4 Docker Desktop (Windows / macOS) and Machines Without a GPU
+
+Two override files adapt the stack without editing `docker-compose.yml`:
+
+| File | Use it when | What it changes |
+|------|-------------|-----------------|
+| `docker-compose.desktop.yml` | Running on Docker Desktop | Drops cAdvisor's `/dev/disk` mount (absent in the Desktop VM) and disables the DCGM exporter (unsupported on WSL 2) |
+| `docker-compose.cpu.yml` | There is no NVIDIA GPU | Runs Ollama on CPU; also set `OLLAMA_MODEL=qwen3:1.7b` and `OLLAMA_TIMEOUT_SECONDS=180` in `.env` |
+
+```bash
+# Docker Desktop with an NVIDIA GPU
+docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d --build
+
+# Docker Desktop without a GPU
+docker compose -f docker-compose.yml -f docker-compose.desktop.yml -f docker-compose.cpu.yml up -d --build
+```
+
+Use the same `-f` flags for every later `docker compose` command (`ps`, `logs`, `down`).
 
 ---
 

@@ -1,0 +1,6 @@
+# Keep LF endings on every platform: Dockerfiles, shell scripts and configs are
+# consumed inside Linux containers, where CRLF breaks multi-line RUN commands.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary

@@ -1,0 +1,17 @@
+# ============================================================
+# Override for machines without an NVIDIA GPU
+# ============================================================
+# Usage (combine with docker-compose.desktop.yml on Windows/macOS):
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --build
+#
+# Ollama runs on CPU: use a smaller model and a longer timeout in .env, e.g.
+#   OLLAMA_MODEL=qwen3:1.7b
+#   OLLAMA_TIMEOUT_SECONDS=180
+# ============================================================
+
+services:
+  ollama:
+    deploy: !reset {}
+
+  dcgm-exporter:
+    profiles: ["gpu-telemetry"]
