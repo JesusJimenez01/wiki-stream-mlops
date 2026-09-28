@@ -190,7 +190,7 @@ def chunked(rows: List[Dict[str, Any]], size: int) -> List[List[Dict[str, Any]]]
 
 
 def write_batch_to_mongo(batch_df: DataFrame, batch_id: int) -> None:
-    rows = [row.asDict(recursive=True) for row in batch_df.orderBy(col("gold_ts").asc()).collect()]
+    rows = [row.asDict(recursive=True) for row in batch_df.orderBy("gold_ts").collect()]
     if not rows:
         logger.info("batch=%s total=0 (no new gold events)", batch_id)
         return
