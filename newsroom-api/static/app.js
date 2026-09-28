@@ -3,8 +3,27 @@
    ============================================================ */
 const API = '/api';
 
+/* ── Output encoding ──
+   Headlines, summaries and tags are written by an LLM from public Wikipedia
+   edits, i.e. untrusted input. Every dynamic value goes through esc() before
+   reaching innerHTML, and links are restricted to http(s). */
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
+}
+
+function safeUrl(url) {
+    try {
+        const parsed = new URL(String(url || ''), window.location.origin);
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : '#';
+    } catch (e) {
+        return '#';
+    }
+}
+
 const App = {
-    currentTab: 'portada',
+    currentTab: 'front-page',
     topics: [],
     topTopic: null,
 
@@ -13,7 +32,7 @@ const App = {
         this.setDate();
         this.bindTabs();
         await this.loadStats();
-        this.navigate('portada');
+        this.navigate('front-page');
     },
 
     setDate() {
@@ -73,11 +92,11 @@ const App = {
 
         try {
             switch (tab) {
-                case 'portada':     await this.renderPortada(main); break;
-                case 'ultima-hora': await this.renderUltimaHora(main); break;
-                case 'en-vivo':     await this.renderEnVivo(main); break;
-                case 'top-topic':   await this.renderTopic(main, this.topTopic || 'property'); break;
-                default:            await this.renderPortada(main); break;
+                case 'front-page': await this.renderFrontPage(main); break;
+                case 'latest':     await this.renderLatest(main); break;
+                case 'live':       await this.renderLive(main); break;
+                case 'top-topic':  await this.renderTopic(main, this.topTopic || 'property'); break;
+                default:           await this.renderFrontPage(main); break;
             }
         } catch (err) {
             main.innerHTML = '<div class="empty-state">Printing error. Please try again in a few moments.</div>';
@@ -93,13 +112,13 @@ const App = {
     },
 
     async fetchStory(storyId) {
-        const res = await fetch(API + '/news/' + storyId);
+        const res = await fetch(API + '/news/' + encodeURIComponent(storyId));
         if (!res.ok) throw new Error(res.statusText);
         return await res.json();
     },
 
     /* ── Tab renderers ── */
-    async renderPortada(el) {
+    async renderFrontPage(el) {
         const items = await this.fetchNews('?limit=30');
         if (!items.length) { el.innerHTML = '<div class="empty-state">No news available.</div>'; return; }
 
@@ -112,7 +131,7 @@ const App = {
         this.bindCards(el);
     },
 
-    async renderUltimaHora(el) {
+    async renderLatest(el) {
         const items = await this.fetchNews('?limit=20');
         if (!items.length) { el.innerHTML = '<div class="empty-state">No recent dispatches.</div>'; return; }
 
@@ -124,7 +143,7 @@ const App = {
         this.bindCards(el);
     },
 
-    async renderEnVivo(el) {
+    async renderLive(el) {
         const items = await this.fetchNews('?limit=80');
         const live = items.filter(i => i.is_live_event);
         if (!live.length) {
@@ -142,10 +161,10 @@ const App = {
     async renderTopic(el, topicTerm) {
         const items = await this.fetchNews('?topic=' + encodeURIComponent(topicTerm) + '&limit=20');
         if (!items.length) {
-            el.innerHTML = '<div class="empty-state">No articles in the \u201c' + topicTerm + '\u201d section.</div>';
+            el.innerHTML = '<div class="empty-state">No articles in the \u201c' + esc(topicTerm) + '\u201d section.</div>';
             return;
         }
-        let html = '<h2 class="section-title">' + topicTerm.charAt(0).toUpperCase() + topicTerm.slice(1) + '</h2>';
+        let html = '<h2 class="section-title">' + esc(topicTerm.charAt(0).toUpperCase() + topicTerm.slice(1)) + '</h2>';
         html += this.buildLead(items[0]);
         if (items.length > 1) {
             html += '<div class="front-grid">';
@@ -167,21 +186,21 @@ const App = {
                 weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
                 hour: '2-digit', minute: '2-digit'
             });
-            const tags = (story.tags || []).map(function(t) { return '<span>' + t + '</span>'; }).join('');
+            const tags = (story.tags || []).map(function(t) { return '<span>' + esc(t) + '</span>'; }).join('');
             const live = story.is_live_event ? ' <span class="badge-live">Live</span>' : '';
 
             main.innerHTML = '<div class="article-page">'
                 + '<a href="#" class="article-back" id="back-link">\u2190 Back to front page</a>'
-                + '<div class="article-kicker">' + (story.topic_label || story.topic_term || 'General') + live + '</div>'
-                + '<h1 class="article-title">' + story.headline + '</h1>'
+                + '<div class="article-kicker">' + esc(story.topic_label || story.topic_term || 'General') + live + '</div>'
+                + '<h1 class="article-title">' + esc(story.headline) + '</h1>'
                 + '<div class="article-byline">'
-                +   'By <strong>Wikipedia Newsroom</strong> &mdash; ' + dateStr + '<br>'
-                +   'Dispatch: ' + story.domain + ' &bull; ' + story.topic_event_count + ' related events'
+                +   'By <strong>Wikipedia Newsroom</strong> &mdash; ' + esc(dateStr) + '<br>'
+                +   'Dispatch: ' + esc(story.domain) + ' &bull; ' + esc(story.topic_event_count) + ' related events'
                 + '</div>'
-                + '<div class="article-body"><p>' + story.summary + '</p></div>'
+                + '<div class="article-body"><p>' + esc(story.summary) + '</p></div>'
                 + '<div class="article-tags">' + tags + '</div>'
                 + '<div class="article-source">'
-                +   '<a href="' + (story.title_url || '#') + '" target="_blank">Read original dispatch on Wikimedia \u2192</a>'
+                +   '<a href="' + esc(safeUrl(story.title_url)) + '" target="_blank" rel="noopener noreferrer">Read original dispatch on Wikimedia \u2192</a>'
                 + '</div>'
                 + '</div>';
 
@@ -203,21 +222,21 @@ const App = {
 
     buildLead(item) {
         const live = item.is_live_event ? '<span class="badge-live">Live</span> ' : '';
-        return '<div class="lead-wrapper" data-story="' + item.story_id + '">'
-            + '<div class="lead-topic">' + live + (item.topic_label || item.topic_term || 'General') + '</div>'
-            + '<h2 class="lead-headline">' + item.headline + '</h2>'
-            + '<div class="lead-summary">' + item.summary + '</div>'
-            + '<div class="lead-meta">' + item.domain + ' &mdash; ' + this.fmtDate(item.timestamp) + '</div>'
+        return '<div class="lead-wrapper" data-story="' + esc(item.story_id) + '">'
+            + '<div class="lead-topic">' + live + esc(item.topic_label || item.topic_term || 'General') + '</div>'
+            + '<h2 class="lead-headline">' + esc(item.headline) + '</h2>'
+            + '<div class="lead-summary">' + esc(item.summary) + '</div>'
+            + '<div class="lead-meta">' + esc(item.domain) + ' &mdash; ' + esc(this.fmtDate(item.timestamp)) + '</div>'
             + '</div>';
     },
 
     buildCard(item, showLive) {
         const live = (showLive && item.is_live_event) ? '<span class="badge-live">Live</span> ' : '';
-        return '<div class="card" data-story="' + item.story_id + '">'
-            + '<div class="card-topic">' + live + (item.topic_label || item.topic_term || 'General') + '</div>'
-            + '<div class="card-headline">' + item.headline + '</div>'
-            + '<div class="card-summary">' + item.summary + '</div>'
-            + '<div class="card-meta">' + item.domain + ' &mdash; ' + this.fmtDate(item.timestamp) + '</div>'
+        return '<div class="card" data-story="' + esc(item.story_id) + '">'
+            + '<div class="card-topic">' + live + esc(item.topic_label || item.topic_term || 'General') + '</div>'
+            + '<div class="card-headline">' + esc(item.headline) + '</div>'
+            + '<div class="card-summary">' + esc(item.summary) + '</div>'
+            + '<div class="card-meta">' + esc(item.domain) + ' &mdash; ' + esc(this.fmtDate(item.timestamp)) + '</div>'
             + '</div>';
     },
 

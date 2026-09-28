@@ -1,4 +1,9 @@
-"""Gold Enrichment — Wikipedia Pipeline (Phase 4)"""
+"""
+Gold Enrichment — Wikipedia Pipeline (Phase 4)
+
+Turns curated Silver topics into news stories with a local LLM (Ollama),
+then applies editorial guardrails, deduplication and story lifecycle rules.
+"""
 
 import json
 import logging
@@ -8,7 +13,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from pyspark.sql import DataFrame, SparkSession
@@ -228,7 +232,7 @@ def build_topic_prompt(topic_term: str, topic_event_count: int, samples: List[Di
         f"- title: {sample.get('title', '')} | comment: {sample.get('comment', '')} | domain: {sample.get('domain', '')}"
         for sample in samples
     ]
-    context_block = "\n".join(sample_lines) if sample_lines else "- sin muestras"
+    context_block = "\n".join(sample_lines) if sample_lines else "- no samples"
     source_label = resolve_source_label(samples)
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
@@ -249,13 +253,17 @@ def build_topic_prompt(topic_term: str, topic_event_count: int, samples: List[Di
 
 
 def extract_json_object(text: str) -> Dict[str, Any]:
+    """Parse the model output, tolerating prose around the JSON object."""
     try:
-        return json.loads(text)
+        payload = json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             raise ValueError("No valid JSON found in the model's response")
-        return json.loads(match.group(0))
+        payload = json.loads(match.group(0))
+    if not isinstance(payload, dict):
+        raise ValueError("The model's response is not a JSON object")
+    return payload
 
 
 def normalize_model_output(payload: Dict[str, Any]) -> Tuple[str, str, str, List[str]]:
@@ -288,7 +296,9 @@ def call_ollama(prompt: str, topic_term: str, samples: List[Dict[str, str]]) -> 
         if contains_foreign_script(combined):
             raise ValueError("The model's response was not completely in English")
         return topic_label, headline, summary, tags, True, None
-    except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+    # OSError covers URLError, timeouts and dropped connections; ValueError covers bad JSON.
+    # Any of them yields a fallback story instead of failing the whole micro-batch.
+    except (OSError, ValueError) as exc:
         topic_label, headline, summary, tags = enforce_human_framing(
             topic_term,
             samples,
@@ -404,14 +414,27 @@ def load_recent_topic_candidates(spark: SparkSession, topic_terms: List[str]) ->
     return grouped
 
 
-def evaluate_duplicate_news(topic_event_count: int, headline: str, summary: str, topic_candidates: List[Dict[str, Any]], now_utc: datetime) -> Tuple[bool, float, Optional[str], bool]:
-    if not topic_candidates:
-        return False, 0.0, None, False
+def find_recent_publication(topic_candidates: List[Dict[str, Any]], now_utc: datetime) -> Optional[str]:
+    """
+    Return the gold_ts of a story on this topic published less than
+    GOLD_MIN_UPDATE_INTERVAL_MINUTES ago, if any.
+
+    Such a topic can never produce a new story or an update yet, so this check
+    runs before the LLM call to avoid spending GPU time on discarded drafts.
+    """
     for candidate in topic_candidates:
         candidate_dt = parse_iso_datetime(candidate.get("gold_ts"))
         if candidate_dt and (now_utc - candidate_dt).total_seconds() / 60 < GOLD_MIN_UPDATE_INTERVAL_MINUTES:
-            if not should_allow_update(now_utc, candidate.get("gold_ts"), candidate.get("topic_event_count"), topic_event_count):
-                return True, 1.0, candidate.get("gold_ts"), False
+            return candidate.get("gold_ts")
+    return None
+
+
+def evaluate_duplicate_news(topic_event_count: int, headline: str, summary: str, topic_candidates: List[Dict[str, Any]], now_utc: datetime) -> Tuple[bool, float, Optional[str], bool]:
+    if not topic_candidates:
+        return False, 0.0, None, False
+    recent_gold_ts = find_recent_publication(topic_candidates, now_utc)
+    if recent_gold_ts is not None:
+        return True, 1.0, recent_gold_ts, False
 
     current_headline = normalize_similarity_text(headline)
     current_summary = normalize_similarity_text(summary)
@@ -469,7 +492,7 @@ def conclude_stale_stories(spark: SparkSession) -> int:
     if "is_live_event" not in gold_df.columns or "updated_at" not in gold_df.columns:
         return 0
     try:
-        target_count = gold_df.filter((col("is_live_event") == True) & (col("updated_at") < cutoff_iso)).count()
+        target_count = gold_df.filter(col("is_live_event") & (col("updated_at") < cutoff_iso)).count()
         if target_count == 0:
             return 0
         spark.sql(f"UPDATE delta.`{GOLD_OUTPUT_PATH}` SET is_live_event = false WHERE is_live_event = true AND updated_at < '{cutoff_iso}'")
@@ -506,6 +529,12 @@ def main() -> None:
         dedup_discarded = 0
         update_events = 0
         for row in topic_rows:
+            topic_candidates = recent_candidates_by_topic.get(row["topic_term"], [])
+            if find_recent_publication(topic_candidates, now_utc) is not None:
+                # Silver re-emits hot topics every micro-batch; skip them before paying for inference
+                dedup_discarded += 1
+                continue
+
             samples = json.loads(row["samples_json"] or "[]")
             translated_topic_label, headline, summary, tags, inference_ok, inference_error = call_ollama(
                 build_topic_prompt(row["topic_term"], int(row["topic_event_count"] or 0), samples),
@@ -513,7 +542,6 @@ def main() -> None:
                 samples,
             )
 
-            topic_candidates = recent_candidates_by_topic.get(row["topic_term"], [])
             is_duplicate, dedup_score, duplicate_of_gold_ts, is_update = evaluate_duplicate_news(
                 topic_event_count=int(row["topic_event_count"] or 0),
                 headline=headline,
@@ -587,7 +615,7 @@ def main() -> None:
 
         enriched_df = spark.createDataFrame(topic_news_records, schema=GOLD_SCHEMA)
         enriched_df.write.format("delta").mode("append").option("mergeSchema", "true").save(GOLD_OUTPUT_PATH)
-        success_events = enriched_df.filter(col("inference_ok") == True).count()
+        success_events = sum(1 for record in topic_news_records if record["inference_ok"])
         failed_events = len(topic_news_records) - success_events
         write_metrics(
             spark,

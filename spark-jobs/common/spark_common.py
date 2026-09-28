@@ -15,6 +15,7 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "lakehouse")
 
 
 def create_spark_session(app_name: str) -> SparkSession:
+    """Spark session with Delta Lake and the S3A connector pointed at MinIO."""
     return (
         SparkSession.builder.appName(app_name)
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -31,6 +32,7 @@ def create_spark_session(app_name: str) -> SparkSession:
 
 
 def wait_for_delta_source(spark: SparkSession, path: str, name: str) -> None:
+    """Block until the upstream Delta table exists (streams start in any order)."""
     while True:
         try:
             spark.read.format("delta").load(path).limit(1).count()
@@ -39,5 +41,5 @@ def wait_for_delta_source(spark: SparkSession, path: str, name: str) -> None:
             msg = str(exc)
             if not any(t in msg for t in ["DELTA_SCHEMA_NOT_SET", "Path does not exist", "is not a Delta table"]):
                 raise
-            logger.info("Esperando %s en %s", name, path)
+            logger.info("Waiting for %s at %s", name, path)
             time.sleep(5)

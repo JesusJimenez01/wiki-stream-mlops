@@ -1,3 +1,5 @@
+"""Pure-Python editorial rules shared by the Spark jobs and the newsroom API."""
+
 import re
 from typing import Any, Dict, List, Optional
 
