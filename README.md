@@ -1,20 +1,31 @@
-Note: This repository is a consolidated, refactored, and translated version of a project originally developed during my AI & Big Data specialization. The codebase has been cleaned for portfolio demonstration purposes.
+# Wiki Stream MLOps
 
-# WIKI STREAM MLOPS
+[![CI](https://github.com/JesusJimenez01/wiki-stream-mlops/actions/workflows/ci.yml/badge.svg)](https://github.com/JesusJimenez01/wiki-stream-mlops/actions/workflows/ci.yml)
+![Spark](https://img.shields.io/badge/Spark-3.5-E25A1C)
+![Delta Lake](https://img.shields.io/badge/Delta_Lake-3.2-00ADD4)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A real-time data platform that transforms Wikipedia edits into automatically generated news stories in English.
 
-One-line summary:
-
 **Wikipedia SSE -> Redpanda -> Spark (Bronze/Silver/Gold) -> MongoDB -> FastAPI/Web -> Prometheus/Grafana**
 
-## Portfolio Snapshot
+![Wiki Stream newsroom](screenshots/web.png)
 
-* End-to-end real-time pipeline with clear layer separation.
-* Spark + Delta Lake + MinIO for durable processing.
-* AI newsroom generated locally with Ollama.
-* FastAPI web app and Grafana observability ready for demos.
-* Data quality checks for Silver and Gold.
+## Highlights
+
+* **End-to-end streaming pipeline**: 19 services orchestrated with Docker Compose, from a live
+  Wikimedia event stream to a web newsroom, with a medallion lakehouse (Delta Lake on MinIO) in between.
+* **Editorial intelligence before the LLM**: bots, minor edits, namespaces and reverted edits are
+  filtered in Silver; only topics that survive a maturation window reach the model.
+* **Local LLM with guardrails**: news drafted by Ollama (`qwen3:8b`), then validated (JSON contract,
+  language, framing) with a deterministic fallback so a bad answer never breaks a micro-batch.
+* **Story lifecycle**: deduplication, controlled updates of live stories and idempotent publishing
+  (`story_id:update_seq`), so replays never duplicate news.
+* **Full observability**: provisioned Grafana dashboards for the pipeline, the infrastructure (host,
+  containers, GPU) and product KPIs such as inference success rate and news freshness.
+* **Tested**: unit tests for the producer, Spark jobs and API, Spark + Delta integration tests and frontend tests,
+  all running in CI.
 
 ---
 
@@ -33,6 +44,24 @@ Academic goal: to demonstrate an end-to-end Big Data flow focusing on data quali
 ---
 
 ## 2. Layered Architecture
+
+```mermaid
+flowchart LR
+    W[Wikimedia SSE<br/>recent changes] --> P[Producer]
+    P --> R[(Redpanda<br/>wiki-raw)]
+    R --> B[Spark Bronze]
+    B --> D1[(Delta: bronze)]
+    D1 --> S[Spark Silver<br/>curation + topics]
+    S --> D2[(Delta: silver)]
+    D2 --> G[Spark Gold<br/>AI newsroom]
+    G <--> O[Ollama<br/>qwen3:8b]
+    G --> D3[(Delta: gold)]
+    D3 --> M[Spark Serving]
+    M --> DB[(MongoDB)]
+    DB --> A[FastAPI<br/>web + API]
+    A --> PR[Prometheus]
+    PR --> GR[Grafana]
+```
 
 ### 2.1 Layer View
 
@@ -84,6 +113,16 @@ Academic goal: to demonstrate an end-to-end Big Data flow focusing on data quali
 ---
 
 ## 4. Quick Start
+
+### 4.0 Prerequisites
+
+* Docker with Docker Compose v2.
+* An NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+  (used by Ollama and the DCGM exporter).
+* About 16 GB of RAM for the full stack (the Spark worker is configured with 8 GB).
+
+> The credentials in `.env.example` are local development defaults. Change them before exposing
+> any port beyond your machine.
 
 ### 4.1 Startup
 
@@ -142,7 +181,26 @@ Note: in `newsroom-api`, the feed prioritizes pieces with valid inference and ke
 
 ---
 
-## 6. Quality and Validations
+## 6. Testing and Quality
+
+### 6.0 Automated Tests (no running stack needed)
+
+| Suite | What it covers | Command |
+|-------|----------------|---------|
+| Unit | Editorial rules, Gold LLM handling and deduplication, producer back-pressure, Mongo serving, API endpoints and metrics | `pytest -m "not spark"` |
+| Integration | Real Spark + Delta Lake: Silver curation, and the serving stream surviving Gold's `UPDATE` | `pytest -m spark` (needs Java 17+) |
+| Frontend | LLM output is HTML-escaped and only `http(s)` links are rendered | `node --test tests/frontend/*.test.mjs` |
+| Lint | Ruff lint + format, `docker compose` validation | `ruff check . && ruff format --check .` |
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+```
+
+All suites run in [GitHub Actions](.github/workflows/ci.yml) on every push.
+
+The checks below run against a **live** stack and validate the data actually produced.
 
 ### 6.1 Silver Quality Check (Data)
 
@@ -307,15 +365,35 @@ Guiding Scenarios:
 * `spark-jobs/` bronze, silver, gold, and serving
 * `newsroom-api/` web, API, and metrics
 * `observability/` Prometheus + Grafana provisioning
-* `tests/` data quality and gold validations
+* `tests/unit`, `tests/integration`, `tests/frontend` automated test suites
+* `tests/quality_check.py`, `tests/gold_quality_report.py` data quality checks on the live stack
+
+## 12. Design Decisions
+
+| Decision | Why | Trade-off |
+|----------|-----|-----------|
+| Redpanda instead of Apache Kafka | Kafka API with a single binary and no ZooKeeper, ideal for a local stack | Same client code works against managed Kafka (MSK, Confluent) |
+| Medallion layers on Delta Lake + MinIO | ACID appends, replayable history and schema evolution on S3-compatible storage | More storage than a single pipeline, which is what enables reprocessing |
+| Editorial filtering in Silver, not in the prompt | Cheap, deterministic rules (bots, reverts, namespaces) cut LLM calls and hallucination sources | Rules need tuning per wiki language |
+| Maturation window before publishing | Edits reverted within `SILVER_EVENT_HOLD_MINUTES` never become news | News appears a few minutes after the edit |
+| Lexical similarity (SequenceMatcher + Jaccard) for deduplication | No extra model, explainable scores, fast enough per batch | Paraphrased duplicates can slip through; embeddings would catch them |
+| Recent-topic check before calling the LLM | Silver re-emits hot topics every micro-batch; skipping them first saves GPU time | Updates are limited to one per `GOLD_MIN_UPDATE_INTERVAL_MINUTES` |
+| Local LLM (Ollama) with a deterministic fallback | No per-token cost, data stays local, the pipeline keeps flowing if the model fails | Needs a GPU; smaller models than hosted APIs |
+| Idempotent Mongo upserts keyed by `story_id:update_seq` | Replays and re-emitted rows never duplicate news | Every document must carry a stable story identity |
+| Serving reads Gold with `ignoreChanges` | Gold closes stale stories with an `UPDATE`; a plain Delta stream would stop, while this re-emits the rows and the upserts apply the new state | Unchanged rows in rewritten files are re-sent (harmless thanks to idempotency) |
+
+## 13. Project Background
+
+This project started during my AI & Big Data specialization and was later consolidated,
+refactored and translated into English as a portfolio project, which is why the Git history begins
+with a single consolidated commit. Since then it has been extended with bug fixes found in review,
+automated tests and CI.
 
 ---
 
-## 12. Screenshots
+## 14. Screenshots
 
-### Web UI
-
-![Wikipedia Web UI](screenshots/web.png)
+The web newsroom is shown at the top of this page.
 
 ### Business dashboard
 
@@ -330,3 +408,12 @@ Guiding Scenarios:
 ### Pipeline dashboard
 
 ![Wikipedia Pipeline dashboard](screenshots/dashboard_pipeline.png)
+
+
+---
+
+## Author
+
+Designed and built by **Jesús Jiménez Pérez** · [GitHub](https://github.com/JesusJimenez01)
+
+Licensed under the [MIT License](LICENSE).
