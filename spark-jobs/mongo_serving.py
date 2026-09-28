@@ -8,7 +8,7 @@ Streams the Gold Delta table into MongoDB with idempotent upserts keyed by
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, Iterator, List
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
 from pymongo.errors import PyMongoError
@@ -183,27 +183,40 @@ def bootstrap_from_gold(spark: SparkSession) -> None:
         raise
 
 
-def chunked(rows: List[Dict[str, Any]], size: int) -> List[List[Dict[str, Any]]]:
-    """Split rows into bulk-write sized chunks."""
+def iter_chunks(rows: Iterable[Dict[str, Any]], size: int) -> Iterator[List[Dict[str, Any]]]:
+    """Group a stream of rows into bulk-write sized chunks without materializing it."""
     size = max(size, 1)
-    return [rows[start : start + size] for start in range(0, len(rows), size)]
+    chunk: List[Dict[str, Any]] = []
+    for row in rows:
+        chunk.append(row)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def write_batch_to_mongo(batch_df: DataFrame, batch_id: int) -> None:
-    rows = [row.asDict(recursive=True) for row in batch_df.orderBy("gold_ts").collect()]
-    if not rows:
-        logger.info("batch=%s total=0 (no new gold events)", batch_id)
-        return
+    # toLocalIterator pulls one partition at a time, so driver memory is bounded by a
+    # partition plus one chunk, not by the micro-batch (which can be large after Gold
+    # rewrites files and ignoreChanges re-emits them).
+    rows = (row.asDict(recursive=True) for row in batch_df.orderBy("gold_ts").toLocalIterator())
 
     # Every row must reach MongoDB: the checkpoint advances once this batch returns,
     # so anything left out here would be lost for good.
+    written = 0
     try:
-        for chunk in chunked(rows, SERVING_BATCH_LIMIT):
+        for chunk in iter_chunks(rows, SERVING_BATCH_LIMIT):
             write_documents_to_mongo(chunk, source="stream", batch_id=batch_id)
-        logger.info("batch=%s incoming=%s", batch_id, len(rows))
+            written += len(chunk)
     except PyMongoError as exc:
-        logger.error("batch=%s error_mongo=%s", batch_id, exc)
+        logger.error("batch=%s written_before_error=%s error_mongo=%s", batch_id, written, exc)
         raise
+
+    if written == 0:
+        logger.info("batch=%s total=0 (no new gold events)", batch_id)
+    else:
+        logger.info("batch=%s incoming=%s", batch_id, written)
 
 
 def read_gold_stream(

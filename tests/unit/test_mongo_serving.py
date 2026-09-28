@@ -36,24 +36,50 @@ def test_document_id_is_story_and_sequence():
     assert doc["tags"] == ["space"]
 
 
-def test_chunked_splits_without_losing_rows():
-    rows = list(range(7))
-    assert serving.chunked(rows, 3) == [[0, 1, 2], [3, 4, 5], [6]]
-    assert serving.chunked(rows, 0) == [[r] for r in rows]
+def test_iter_chunks_streams_without_losing_rows():
+    assert list(serving.iter_chunks(iter(range(7)), 3)) == [[0, 1, 2], [3, 4, 5], [6]]
+    assert list(serving.iter_chunks(iter(range(3)), 0)) == [[0], [1], [2]]
+    assert list(serving.iter_chunks(iter([]), 5)) == []
 
 
-def test_large_batches_are_written_in_chunks_not_truncated(monkeypatch):
+def test_iter_chunks_is_lazy():
+    consumed = []
+
+    def rows():
+        for i in range(10):
+            consumed.append(i)
+            yield i
+
+    first = next(serving.iter_chunks(rows(), 2))
+
+    assert first == [0, 1]
+    assert consumed == [0, 1]  # the rest of the batch has not been pulled yet
+
+
+def test_large_batches_are_streamed_in_chunks_not_collected(monkeypatch):
     written = []
     monkeypatch.setattr(serving, "SERVING_BATCH_LIMIT", 2)
     monkeypatch.setattr(serving, "write_documents_to_mongo", lambda rows, source, batch_id: written.append(rows))
 
     batch_df = MagicMock()
-    batch_df.orderBy.return_value.collect.return_value = [Row(**_gold_row(f"s{i}")) for i in range(5)]
+    batch_df.orderBy.return_value.toLocalIterator.return_value = iter(Row(**_gold_row(f"s{i}")) for i in range(5))
 
     serving.write_batch_to_mongo(batch_df, batch_id=1)
 
+    batch_df.orderBy.return_value.collect.assert_not_called()
     assert [len(chunk) for chunk in written] == [2, 2, 1]
     assert [row["story_id"] for chunk in written for row in chunk] == ["s0", "s1", "s2", "s3", "s4"]
+
+
+def test_empty_batch_writes_nothing(monkeypatch):
+    write = MagicMock()
+    monkeypatch.setattr(serving, "write_documents_to_mongo", write)
+    batch_df = MagicMock()
+    batch_df.orderBy.return_value.toLocalIterator.return_value = iter([])
+
+    serving.write_batch_to_mongo(batch_df, batch_id=1)
+
+    write.assert_not_called()
 
 
 def test_upserts_are_idempotent_and_indexes_created_once(monkeypatch):

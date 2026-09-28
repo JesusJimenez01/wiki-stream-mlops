@@ -74,6 +74,23 @@ def test_gold_stream_survives_stale_story_update_and_reemits_new_state(spark, tm
     assert ("s1", False) in seen
 
 
+def test_serving_writes_a_real_micro_batch_in_ordered_chunks(spark, monkeypatch):
+    import mongo_serving
+
+    written = []
+    monkeypatch.setattr(mongo_serving, "SERVING_BATCH_LIMIT", 2)
+    monkeypatch.setattr(mongo_serving, "write_documents_to_mongo", lambda rows, source, batch_id: written.append(rows))
+    batch = spark.createDataFrame(
+        [(f"s{i}", 1, f"2026-09-28T12:0{i}:00+00:00") for i in (3, 0, 4, 1, 2)],
+        "story_id string, update_seq int, gold_ts string",
+    ).repartition(3)
+
+    mongo_serving.write_batch_to_mongo(batch, batch_id=7)
+
+    assert [len(chunk) for chunk in written] == [2, 2, 1]
+    assert [row["story_id"] for chunk in written for row in chunk] == ["s0", "s1", "s2", "s3", "s4"]
+
+
 def test_plain_delta_stream_fails_on_update(spark, tmp_path):
     """Documents why the serving reader needs ignoreChanges (regression guard)."""
     gold = str(tmp_path / "gold")

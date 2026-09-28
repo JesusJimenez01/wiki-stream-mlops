@@ -86,6 +86,19 @@ class TestCallOllama:
         assert headline == "Artemis II crew named"
         assert tags == ["NASA", "Moon"]
 
+    @pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"just a string"'])
+    def test_non_object_http_body_produces_a_fallback(self, monkeypatch, body):
+        response = MagicMock()
+        response.read.return_value = body
+        opener = MagicMock()
+        opener.return_value.__enter__.return_value = response
+        monkeypatch.setattr(gold, "urlopen", opener)
+
+        *_, ok, error = gold.call_ollama("prompt", "Artemis II", SAMPLES)
+
+        assert ok is False
+        assert "Unexpected Ollama response body" in error
+
     @pytest.mark.parametrize("exc", [ConnectionResetError("reset by peer"), TimeoutError("timed out")])
     def test_network_errors_produce_a_fallback_instead_of_failing_the_batch(self, monkeypatch, exc):
         monkeypatch.setattr(gold, "urlopen", MagicMock(side_effect=exc))
