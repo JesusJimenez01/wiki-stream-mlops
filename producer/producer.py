@@ -1,3 +1,10 @@
+"""
+Wikipedia SSE Producer — Wikipedia Pipeline (Phase 1)
+
+Reads the Wikimedia recent-changes Server-Sent Events stream, validates each
+event and publishes it to Redpanda (Kafka API) with idempotent delivery.
+"""
+
 import json
 import logging
 import os
@@ -20,12 +27,14 @@ logger = logging.getLogger("wiki-producer")
 SSE_URL = os.getenv("WIKI_SSE_URL", "https://stream.wikimedia.org/v2/stream/recentchange")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("REDPANDA_BROKER", "redpanda:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_RAW", "wiki-raw")
+# Wikimedia's User-Agent policy asks clients to identify themselves with a contact URL
 USER_AGENT = os.getenv(
     "WIKI_USER_AGENT",
-    "wikipedia-producer/1.0 (https://wikipedia.local; classroom@local)",
+    "wiki-stream-mlops/1.0 (https://github.com/JesusJimenez01/wiki-stream-mlops)",
 )
 RECONNECT_DELAY_SECONDS = float(os.getenv("PRODUCER_RECONNECT_DELAY", "5"))
 LOG_EVERY_N_MESSAGES = int(os.getenv("PRODUCER_LOG_EVERY_N", "100"))
+MAX_PRODUCE_ATTEMPTS = int(os.getenv("PRODUCER_MAX_PRODUCE_ATTEMPTS", "5"))
 
 
 class GracefulStop:
@@ -54,6 +63,28 @@ def is_valid_change(change: dict[str, Any]) -> bool:
     if "title" not in change:
         return False
     return True
+
+
+def produce_with_backpressure(producer: Producer, topic: str, payload: bytes, max_attempts: int) -> bool:
+    """
+    Enqueue a message, waiting for the local queue to drain when it is full.
+
+    confluent-kafka raises BufferError when its in-memory queue is full; polling
+    serves delivery callbacks and frees space, so the same message is retried
+    instead of being dropped.
+
+    Returns:
+        True if the message was enqueued, False if the queue stayed full.
+    """
+    for _ in range(max(max_attempts, 1)):
+        try:
+            producer.produce(topic, payload, callback=delivery_report)
+            producer.poll(0)
+            return True
+        except BufferError:
+            logger.warning("Producer queue is full, waiting for deliveries before retrying...")
+            producer.poll(1)
+    return False
 
 
 def build_producer() -> Producer:
@@ -108,15 +139,11 @@ def run() -> None:
 
                     payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-                    try:
-                        producer.produce(KAFKA_TOPIC, payload_bytes, callback=delivery_report)
-                        producer.poll(0)
-                        total_sent += 1
-                    except BufferError:
+                    if not produce_with_backpressure(producer, KAFKA_TOPIC, payload_bytes, MAX_PRODUCE_ATTEMPTS):
                         total_errors += 1
-                        producer.poll(1)
-                        logger.warning("Producer queue is full, retrying...")
+                        logger.error("Event dropped: producer queue still full after %d attempts", MAX_PRODUCE_ATTEMPTS)
                         continue
+                    total_sent += 1
 
                     if total_sent % LOG_EVERY_N_MESSAGES == 0:
                         now = time.time()

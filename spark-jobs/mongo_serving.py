@@ -1,4 +1,9 @@
-"""Mongo Serving — Wikipedia Pipeline (Phase 5)"""
+"""
+Mongo Serving — Wikipedia Pipeline (Phase 5)
+
+Streams the Gold Delta table into MongoDB with idempotent upserts keyed by
+``story_id:update_seq``, so replays and re-emitted rows never duplicate news.
+"""
 
 import logging
 import os
@@ -27,6 +32,7 @@ MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "news")
 
 SERVING_TRIGGER_INTERVAL = os.getenv("SERVING_TRIGGER_INTERVAL", "30 seconds")
 SERVING_STARTING_VERSION = os.getenv("SERVING_STARTING_VERSION", "latest")
+# Maximum documents per MongoDB bulk write (larger micro-batches are split, never truncated)
 SERVING_BATCH_LIMIT = int(os.getenv("SERVING_BATCH_LIMIT", "200"))
 SERVING_BOOTSTRAP_ENABLED = os.getenv("SERVING_BOOTSTRAP_ENABLED", "true").lower() == "true"
 SERVING_BOOTSTRAP_MAX_RECORDS = int(os.getenv("SERVING_BOOTSTRAP_MAX_RECORDS", "5000"))
@@ -180,26 +186,44 @@ def bootstrap_from_gold(spark: SparkSession) -> None:
         raise
 
 
+def chunked(rows: List[Dict[str, Any]], size: int) -> List[List[Dict[str, Any]]]:
+    """Split rows into bulk-write sized chunks."""
+    size = max(size, 1)
+    return [rows[start:start + size] for start in range(0, len(rows), size)]
+
+
 def write_batch_to_mongo(batch_df: DataFrame, batch_id: int) -> None:
-    total_events = batch_df.count()
-    if total_events == 0:
+    rows = [row.asDict(recursive=True) for row in batch_df.orderBy(col("gold_ts").asc()).collect()]
+    if not rows:
         logger.info("batch=%s total=0 (no new gold events)", batch_id)
         return
 
-    limited_df = batch_df.orderBy(col("gold_ts").desc()).limit(SERVING_BATCH_LIMIT)
-    rows = [row.asDict(recursive=True) for row in limited_df.collect()]
-
-    if not rows:
-        logger.info("batch=%s total=0 (no rows after limit)", batch_id)
-        return
-
+    # Every row must reach MongoDB: the checkpoint advances once this batch returns,
+    # so anything left out here would be lost for good.
     try:
-        write_documents_to_mongo(rows, source="stream", batch_id=batch_id)
-        logger.info("batch=%s incoming=%s sent=%s", batch_id, total_events, len(rows))
-
+        for chunk in chunked(rows, SERVING_BATCH_LIMIT):
+            write_documents_to_mongo(chunk, source="stream", batch_id=batch_id)
+        logger.info("batch=%s incoming=%s", batch_id, len(rows))
     except PyMongoError as exc:
         logger.error("batch=%s error_mongo=%s", batch_id, exc)
         raise
+
+
+def read_gold_stream(spark: SparkSession, path: str = GOLD_PATH, starting_version: str = SERVING_STARTING_VERSION) -> DataFrame:
+    """
+    Streaming read of the Gold table.
+
+    Gold rewrites rows when it closes stale live stories (UPDATE ... SET is_live_event = false).
+    By default a Delta stream fails on any non-append commit (DELTA_SOURCE_TABLE_IGNORE_CHANGES);
+    ignoreChanges re-emits the rewritten rows instead, and the idempotent upserts apply the new
+    state to MongoDB. skipChangeCommits would keep the stream alive but silently drop the update.
+    """
+    return (
+        spark.readStream.format("delta")
+        .option("startingVersion", starting_version)
+        .option("ignoreChanges", "true")
+        .load(path)
+    )
 
 
 def main() -> None:
@@ -210,11 +234,7 @@ def main() -> None:
     bootstrap_from_gold(spark)
     wait_for_delta_source(spark, GOLD_PATH, "Gold")
 
-    gold_stream_df = (
-        spark.readStream.format("delta")
-        .option("startingVersion", SERVING_STARTING_VERSION)
-        .load(GOLD_PATH)
-    )
+    gold_stream_df = read_gold_stream(spark)
     if "topic_label" not in gold_stream_df.columns:
         gold_stream_df = gold_stream_df.withColumn("topic_label", lit(None).cast("string"))
 

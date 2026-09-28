@@ -1,3 +1,5 @@
+"""Spark column expressions for the editorial signals defined in editorial_common."""
+
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import coalesce, col, concat_ws, length, lit, lower, trim, when
 

@@ -1,20 +1,20 @@
 # syntax=docker/dockerfile:1.7
 # ============================================================
-# Spark + dependencias — Pipeline Wikipedia (Fase 2+)
+# Spark + dependencies — Wikipedia pipeline (Phase 2+)
 # ============================================================
-# Multi-stage build: Maven resuelve el árbol COMPLETO de
-# dependencias transitivas (Kafka, Delta Lake, S3A) para
-# blindar contra ClassNotFoundException.
+# Multi-stage build: Maven resolves the FULL tree of
+# transitive dependencies (Kafka, Delta Lake, S3A) to
+# rule out ClassNotFoundException at runtime.
 #
-# Stage 1 — Reutiliza la imagen Spark local como entorno
-#           de resolución (solo descarga Maven CLI ~10 MB).
-# Stage 2 — Imagen Spark limpia + JARs resueltos.
+# Stage 1 — Reuses the Spark image as the resolution
+#           environment (only downloads Maven CLI, ~10 MB).
+# Stage 2 — Clean Spark image + resolved JARs.
 #
-# Resultado: imagen inmutable y autónoma sin dependencia
-#            de Maven Central en tiempo de ejecución.
+# Result: an immutable, self-contained image with no
+#         dependency on Maven Central at runtime.
 # ============================================================
 
-# ── Stage 1: Resolución de dependencias ──────────────────────
+# ── Stage 1: Dependency resolution ───────────────────────────
 FROM apache/spark:3.5.4 AS deps
 
 USER root
@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/root/.m2 \
     -Dmaven.wagon.http.readTimeout=120000 \
     --batch-mode
 
-# ── Stage 2: Imagen Spark final ─────────────────────────────
+# ── Stage 2: Final Spark image ──────────────────────────────
 FROM apache/spark:3.5.4
 
 USER root

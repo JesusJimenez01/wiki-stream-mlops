@@ -1,9 +1,17 @@
+"""
+Newsroom API — Wikipedia Pipeline (Phase 6)
+
+Serves the generated news (web + JSON API) from MongoDB and exposes
+Prometheus metrics about the product, the lakehouse and the HTTP layer.
+"""
+
 import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
@@ -21,11 +29,15 @@ from prometheus_client import (
 )
 from pymongo import DESCENDING, MongoClient
 
-SHARED_HELPERS_DIR = Path(__file__).resolve().parents[1] / "spark-jobs"
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+
+# In the container `common/` is copied next to app.py; in the repo it lives in spark-jobs/
+SHARED_HELPERS_DIR = APP_DIR.parent / "spark-jobs"
 if SHARED_HELPERS_DIR.exists():
     sys.path.insert(0, str(SHARED_HELPERS_DIR))
 
-from common.editorial_common import contains_foreign_script
+from common.editorial_common import contains_foreign_script  # noqa: E402
 
 
 MONGO_HOST = os.getenv("MONGO_HOST", "mongodb")
@@ -81,17 +93,21 @@ _STORAGE_CACHE: Dict[str, Any] = {"expires_at": 0.0, "value": None}
 
 
 app = FastAPI(title=APP_TITLE)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def _mongo_uri() -> str:
     return f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/?authSource=admin"
 
 
+@lru_cache(maxsize=1)
+def _mongo_client() -> MongoClient:
+    """Process-wide MongoDB client: it is thread-safe and keeps its own connection pool."""
+    return MongoClient(_mongo_uri(), serverSelectionTimeoutMS=5000)
+
+
 def _get_collection():
-    client = MongoClient(_mongo_uri(), serverSelectionTimeoutMS=5000)
-    db = client[MONGO_DATABASE]
-    return client, db[MONGO_COLLECTION]
+    return _mongo_client()[MONGO_DATABASE][MONGO_COLLECTION]
 
 
 def _get_minio_client() -> Minio:
@@ -206,6 +222,7 @@ def _safe_datetime(value: Any) -> datetime:
     except ValueError:
         return datetime.now(timezone.utc)
 
+
 def _topic_distribution(collection) -> List[Dict[str, Any]]:
     pipeline = [
         {"$group": {"_id": {"topic_term": "$topic_term", "topic_label": "$topic_label", "domain": "$domain"}, "count": {"$sum": 1}}},
@@ -224,52 +241,61 @@ def _topic_distribution(collection) -> List[Dict[str, Any]]:
 
 
 def _metrics_snapshot() -> Dict[str, Any]:
-    client, collection = _get_collection()
-    try:
-        total = int(collection.count_documents({}))
-        live_total = int(collection.count_documents({"is_live_event": True}))
-        success_total = int(collection.count_documents({"inference_ok": True}))
-        ratio = (float(success_total) / float(total)) if total else 0.0
-        db_stats = client[MONGO_DATABASE].command("dbStats")
-        mongo_storage_bytes = int(db_stats.get("storageSize", 0) or 0)
-        storage_snapshot = _storage_snapshot()
-        project_storage_bytes = int(storage_snapshot["lakehouse_storage_bytes"]) + mongo_storage_bytes
+    collection = _get_collection()
+    total = int(collection.count_documents({}))
+    live_total = int(collection.count_documents({"is_live_event": True}))
+    success_total = int(collection.count_documents({"inference_ok": True}))
+    ratio = (float(success_total) / float(total)) if total else 0.0
+    db_stats = collection.database.command("dbStats")
+    mongo_storage_bytes = int(db_stats.get("storageSize", 0) or 0)
+    storage_snapshot = _storage_snapshot()
+    project_storage_bytes = int(storage_snapshot["lakehouse_storage_bytes"]) + mongo_storage_bytes
 
-        latest = collection.find_one({}, sort=[("timestamp", DESCENDING)])
-        if latest:
-            latest_ts = _safe_datetime(latest.get("timestamp"))
-            age_minutes = max((datetime.now(timezone.utc) - latest_ts).total_seconds() / 60.0, 0.0)
-        else:
-            age_minutes = 0.0
+    latest = collection.find_one({}, sort=[("timestamp", DESCENDING)])
+    if latest:
+        latest_ts = _safe_datetime(latest.get("timestamp"))
+        age_minutes = max((datetime.now(timezone.utc) - latest_ts).total_seconds() / 60.0, 0.0)
+    else:
+        age_minutes = 0.0
 
-        NEWS_TOTAL.set(total)
-        LIVE_NEWS_TOTAL.set(live_total)
-        INFERENCE_SUCCESS_RATIO.set(ratio)
-        LATEST_NEWS_AGE_MINUTES.set(age_minutes)
-        RAW_EVENTS_TOTAL.set(int(storage_snapshot["raw_events_total"]))
-        BRONZE_STORAGE_BYTES.set(int(storage_snapshot["bronze_storage_bytes"]))
-        SILVER_STORAGE_BYTES.set(int(storage_snapshot["silver_storage_bytes"]))
-        GOLD_STORAGE_BYTES.set(int(storage_snapshot["gold_storage_bytes"]))
-        LAKEHOUSE_STORAGE_BYTES.set(int(storage_snapshot["lakehouse_storage_bytes"]))
-        MONGODB_STORAGE_BYTES.set(mongo_storage_bytes)
-        PROJECT_STORAGE_BYTES.set(project_storage_bytes)
+    NEWS_TOTAL.set(total)
+    LIVE_NEWS_TOTAL.set(live_total)
+    INFERENCE_SUCCESS_RATIO.set(ratio)
+    LATEST_NEWS_AGE_MINUTES.set(age_minutes)
+    RAW_EVENTS_TOTAL.set(int(storage_snapshot["raw_events_total"]))
+    BRONZE_STORAGE_BYTES.set(int(storage_snapshot["bronze_storage_bytes"]))
+    SILVER_STORAGE_BYTES.set(int(storage_snapshot["silver_storage_bytes"]))
+    GOLD_STORAGE_BYTES.set(int(storage_snapshot["gold_storage_bytes"]))
+    LAKEHOUSE_STORAGE_BYTES.set(int(storage_snapshot["lakehouse_storage_bytes"]))
+    MONGODB_STORAGE_BYTES.set(mongo_storage_bytes)
+    PROJECT_STORAGE_BYTES.set(project_storage_bytes)
 
-        return {
-            "total_news": total,
-            "live_news": live_total,
-            "inference_success_ratio": ratio,
-            "latest_news_age_minutes": age_minutes,
-            "raw_events_total": int(storage_snapshot["raw_events_total"]),
-            "bronze_storage_bytes": int(storage_snapshot["bronze_storage_bytes"]),
-            "silver_storage_bytes": int(storage_snapshot["silver_storage_bytes"]),
-            "gold_storage_bytes": int(storage_snapshot["gold_storage_bytes"]),
-            "lakehouse_storage_bytes": int(storage_snapshot["lakehouse_storage_bytes"]),
-            "mongodb_storage_bytes": mongo_storage_bytes,
-            "project_storage_bytes": project_storage_bytes,
-            "top_topics": _topic_distribution(collection),
-        }
-    finally:
-        client.close()
+    return {
+        "total_news": total,
+        "live_news": live_total,
+        "inference_success_ratio": ratio,
+        "latest_news_age_minutes": age_minutes,
+        "raw_events_total": int(storage_snapshot["raw_events_total"]),
+        "bronze_storage_bytes": int(storage_snapshot["bronze_storage_bytes"]),
+        "silver_storage_bytes": int(storage_snapshot["silver_storage_bytes"]),
+        "gold_storage_bytes": int(storage_snapshot["gold_storage_bytes"]),
+        "lakehouse_storage_bytes": int(storage_snapshot["lakehouse_storage_bytes"]),
+        "mongodb_storage_bytes": mongo_storage_bytes,
+        "project_storage_bytes": project_storage_bytes,
+        "top_topics": _topic_distribution(collection),
+    }
+
+
+def _route_label(request) -> str:
+    """
+    Metric label for the request path.
+
+    Uses the route template (``/api/news/{story_id}``) instead of the raw URL:
+    labelling by raw path would create one time series per story id or scanned
+    URL, an unbounded cardinality that grows Prometheus memory without limit.
+    """
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or "unmatched"
 
 
 @app.middleware("http")
@@ -277,7 +303,7 @@ async def metrics_middleware(request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     elapsed = time.perf_counter() - start
-    path = request.url.path
+    path = _route_label(request)
     method = request.method
     status = str(response.status_code)
     REQUEST_COUNTER.labels(method=method, path=path, status=status).inc()
@@ -287,8 +313,7 @@ async def metrics_middleware(request, call_next):
 
 @app.get("/", response_class=HTMLResponse)
 def root() -> HTMLResponse:
-    with open("static/index.html", "r", encoding="utf-8") as handle:
-        return HTMLResponse(handle.read())
+    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
 
 def _serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -298,6 +323,7 @@ def _serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "update_seq": int(doc.get("update_seq") or 1),
         "is_live_event": bool(doc.get("is_live_event", False)),
         "is_update": bool(doc.get("is_update", False)),
+        "inference_ok": bool(doc.get("inference_ok", False)),
         "topic_term": doc.get("topic_term"),
         "topic_label": doc.get("topic_label") or doc.get("topic_term") or "General",
         "topic_event_count": int(doc.get("topic_event_count") or 0),
@@ -388,9 +414,7 @@ def _has_foreign_content(doc: Dict[str, Any]) -> bool:
 @app.get("/health")
 def health() -> Dict[str, str]:
     try:
-        client, _collection = _get_collection()
-        client.admin.command("ping")
-        client.close()
+        _mongo_client().admin.command("ping")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
     return {"status": "ok"}
@@ -401,44 +425,35 @@ def get_news(
     limit: int = Query(default=30, ge=1, le=100),
     topic: str | None = Query(default=None),
 ) -> Dict[str, Any]:
-    client, collection = _get_collection()
-    try:
-        match_stage: Dict[str, Any] = {"inference_ok": True}
-        if topic:
-            match_stage["topic_term"] = topic
+    collection = _get_collection()
+    match_stage: Dict[str, Any] = {"inference_ok": True}
+    if topic:
+        match_stage["topic_term"] = topic
 
-        candidate_limit = min(max(limit * 4, limit), 300)
-        pipeline = [
-            {"$match": match_stage},
-            {"$sort": {"update_seq": -1}},
-            {"$group": {"_id": "$story_id", "doc": {"$first": "$$ROOT"}}},
-            {"$replaceRoot": {"newRoot": "$doc"}},
-            {"$sort": {"timestamp": -1}},
-            {"$limit": candidate_limit},
-        ]
-        rows = [
-            _serialize_doc(doc)
-            for doc in collection.aggregate(pipeline)
-            if not _has_foreign_content(doc)
-        ]
-        rows = _rank_and_diversify(rows, limit)
-        return {"items": rows, "count": len(rows)}
-    finally:
-        client.close()
+    candidate_limit = min(limit * 4, 300)
+    pipeline = [
+        {"$match": match_stage},
+        {"$sort": {"update_seq": -1}},
+        {"$group": {"_id": "$story_id", "doc": {"$first": "$$ROOT"}}},
+        {"$replaceRoot": {"newRoot": "$doc"}},
+        {"$sort": {"timestamp": -1}},
+        {"$limit": candidate_limit},
+    ]
+    rows = [
+        _serialize_doc(doc)
+        for doc in collection.aggregate(pipeline)
+        if not _has_foreign_content(doc)
+    ]
+    rows = _rank_and_diversify(rows, limit)
+    return {"items": rows, "count": len(rows)}
 
 
 @app.get("/api/news/{story_id}")
 def get_story(story_id: str) -> Dict[str, Any]:
-    client, collection = _get_collection()
-    try:
-        doc = collection.find_one(
-            {"story_id": story_id}, sort=[("update_seq", DESCENDING)]
-        )
-        if not doc:
-            raise HTTPException(status_code=404, detail="Story not found")
-        return _serialize_doc(doc)
-    finally:
-        client.close()
+    doc = _get_collection().find_one({"story_id": story_id}, sort=[("update_seq", DESCENDING)])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Story not found")
+    return _serialize_doc(doc)
 
 
 @app.get("/api/stats")

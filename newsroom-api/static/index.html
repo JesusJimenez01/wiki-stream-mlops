@@ -18,17 +18,17 @@
             </div>
             <div class="masthead-title-row">
                 <div class="rule rule-double"></div>
-                <h1 class="masthead-logo" onclick="App.navigate('portada')">Wikipedia</h1>
+                <h1 class="masthead-logo" onclick="App.navigate('front-page')">Wikipedia</h1>
                 <p class="masthead-subtitle">The free encyclopedia &mdash; Print edition of human knowledge</p>
                 <div class="rule rule-double"></div>
             </div>
             <nav class="tab-bar" id="tab-bar">
-                <a href="#" class="tab active" data-tab="portada">Front Page</a>
-                <a href="#" class="tab" data-tab="ultima-hora">Latest News</a>
-                <a href="#" class="tab" data-tab="en-vivo">Live</a>
+                <a href="#" class="tab active" data-tab="front-page">Front Page</a>
+                <a href="#" class="tab" data-tab="latest">Latest News</a>
+                <a href="#" class="tab" data-tab="live">Live</a>
                 <a href="#" class="tab" data-tab="top-topic" id="dynamic-topic-tab">Trending</a>
                 <span class="tab-spacer"></span>
-                <a href="http://localhost:3000" target="_blank" class="tab tab-external" title="Panel de Observabilidad (Grafana)">&#9881; Observability</a>
+                <a href="http://localhost:3000" target="_blank" rel="noopener noreferrer" class="tab tab-external" title="Observability dashboard (Grafana)">&#9881; Observability</a>
             </nav>
         </header>
 
@@ -44,7 +44,7 @@
             <div class="rule rule-thick"></div>
             <p><strong>WIKIPEDIA</strong> &mdash; Automatically generated from Wikimedia real-time events.<br>
             Pipeline: RedPanda &rarr; Spark (Medallion) &rarr; MongoDB &rarr; FastAPI
-            | <a href="http://localhost:3000" target="_blank">Observability in Grafana</a></p>
+            | <a href="http://localhost:3000" target="_blank" rel="noopener noreferrer">Observability in Grafana</a></p>
         </footer>
     </div>
     <script src="/static/app.js"></script>

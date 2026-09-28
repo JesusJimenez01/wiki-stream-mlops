@@ -213,7 +213,7 @@ services:
       - REDPANDA_BROKER=${REDPANDA_BROKER:-redpanda:9092}
       - KAFKA_TOPIC_RAW=${KAFKA_TOPIC_RAW:-wiki-raw}
       - WIKI_SSE_URL=${WIKI_SSE_URL:-https://stream.wikimedia.org/v2/stream/recentchange}
-      - WIKI_USER_AGENT=${WIKI_USER_AGENT:-wikipedia-producer/1.0 (https://wikipedia.local; classroom@local)}
+      - WIKI_USER_AGENT=${WIKI_USER_AGENT:-wiki-stream-mlops/1.0 (https://github.com/JesusJimenez01/wiki-stream-mlops)}
       - PRODUCER_RECONNECT_DELAY=${PRODUCER_RECONNECT_DELAY:-5}
       - PRODUCER_LOG_EVERY_N=${PRODUCER_LOG_EVERY_N:-100}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
