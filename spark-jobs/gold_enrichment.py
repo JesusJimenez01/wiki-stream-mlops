@@ -313,6 +313,8 @@ def call_ollama(
     try:
         with urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
             response_obj = json.loads(response.read().decode("utf-8"))
+        if not isinstance(response_obj, dict):
+            raise ValueError(f"Unexpected Ollama response body: {type(response_obj).__name__}")
         topic_label, headline, summary, tags = normalize_model_output(
             extract_json_object(str(response_obj.get("response", "")).strip())
         )
