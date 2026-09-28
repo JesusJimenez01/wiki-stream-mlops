@@ -4,7 +4,6 @@ import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import avg, col, length, size
 
-
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "wikipedia")
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "wikipedia123")
@@ -38,8 +37,8 @@ def main() -> None:
     gold_snapshot = gold.cache()
 
     total = gold_snapshot.count()
-    success = gold_snapshot.filter(col("inference_ok") == True).count()
-    fallback = gold_snapshot.filter(col("inference_ok") == False).count()
+    success = gold_snapshot.filter(col("inference_ok")).count()
+    fallback = gold_snapshot.filter(~col("inference_ok")).count()
     empty_headline = gold_snapshot.filter((col("headline").isNull()) | (length(col("headline")) == 0)).count()
     empty_summary = gold_snapshot.filter((col("summary").isNull()) | (length(col("summary")) == 0)).count()
     empty_tags = gold_snapshot.filter(col("tags").isNull() | (size(col("tags")) == 0)).count()

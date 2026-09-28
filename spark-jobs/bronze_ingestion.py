@@ -37,7 +37,9 @@ def main() -> None:
     bronze_df = raw_stream.select(
         col("key").cast("string").alias("key"),
         col("value").cast("string").alias("raw_json"),
-        col("topic"), col("partition"), col("offset"),
+        col("topic"),
+        col("partition"),
+        col("offset"),
         col("timestamp").alias("kafka_timestamp"),
     ).withColumn("ingestion_ts", current_timestamp())
 

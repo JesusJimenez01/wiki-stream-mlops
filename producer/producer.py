@@ -16,7 +16,6 @@ from typing import Any
 from confluent_kafka import Producer
 from requests_sse import EventSource
 
-
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(message)s",

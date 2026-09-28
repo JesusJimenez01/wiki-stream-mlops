@@ -8,13 +8,35 @@ from typing import Any, Dict, List, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
-    coalesce, col, concat_ws, count, current_timestamp, desc, explode, expr,
-    first, from_json, from_unixtime, length, lit, lower, regexp_extract,
-    regexp_replace, split, to_timestamp, trim, when,
+    coalesce,
+    col,
+    concat_ws,
+    count,
+    current_timestamp,
+    desc,
+    explode,
+    expr,
+    first,
+    from_json,
+    from_unixtime,
+    length,
+    lit,
+    lower,
+    regexp_extract,
+    regexp_replace,
+    split,
+    to_timestamp,
+    trim,
+    when,
 )
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType, StructField, StructType
 
-from common.editorial_common import looks_like_generic_topic, looks_like_low_signal_topic, sanitize_topic_label, topic_rank_score
+from common.editorial_common import (
+    looks_like_generic_topic,
+    looks_like_low_signal_topic,
+    sanitize_topic_label,
+    topic_rank_score,
+)
 from common.editorial_spark import with_editorial_signals
 from common.spark_common import MINIO_BUCKET, create_spark_session, wait_for_delta_source
 
@@ -50,43 +72,53 @@ STOPWORDS = {
     if word.strip()
 }
 
-WIKI_CHANGE_SCHEMA = StructType([
-    StructField("id", LongType(), True),
-    StructField("title", StringType(), True),
-    StructField("comment", StringType(), True),
-    StructField("user", StringType(), True),
-    StructField("bot", BooleanType(), True),
-    StructField("minor", BooleanType(), True),
-    StructField("timestamp", LongType(), True),
-    StructField("title_url", StringType(), True),
-    StructField("meta", StructType([
-        StructField("id", StringType(), True),
-        StructField("domain", StringType(), True),
-        StructField("uri", StringType(), True),
-        StructField("dt", StringType(), True),
-    ]), True),
-])
+WIKI_CHANGE_SCHEMA = StructType(
+    [
+        StructField("id", LongType(), True),
+        StructField("title", StringType(), True),
+        StructField("comment", StringType(), True),
+        StructField("user", StringType(), True),
+        StructField("bot", BooleanType(), True),
+        StructField("minor", BooleanType(), True),
+        StructField("timestamp", LongType(), True),
+        StructField("title_url", StringType(), True),
+        StructField(
+            "meta",
+            StructType(
+                [
+                    StructField("id", StringType(), True),
+                    StructField("domain", StringType(), True),
+                    StructField("uri", StringType(), True),
+                    StructField("dt", StringType(), True),
+                ]
+            ),
+            True,
+        ),
+    ]
+)
 
-TOPIC_SCHEMA = StructType([
-    StructField("topic_term", StringType(), False),
-    StructField("topic_key", StringType(), False),
-    StructField("topic_mode", StringType(), False),
-    StructField("topic_label", StringType(), False),
-    StructField("topic_event_count", LongType(), False),
-    StructField("event_id", LongType(), True),
-    StructField("event_meta_id", StringType(), True),
-    StructField("domain", StringType(), True),
-    StructField("article_uri", StringType(), True),
-    StructField("title", StringType(), True),
-    StructField("comment", StringType(), True),
-    StructField("editor_user", StringType(), True),
-    StructField("title_url", StringType(), True),
-    StructField("event_ts", StringType(), True),
-    StructField("silver_ts", StringType(), True),
-    StructField("samples_json", StringType(), False),
-    StructField("silver_topic_ts", StringType(), False),
-    StructField("source_raw_json", StringType(), True),
-])
+TOPIC_SCHEMA = StructType(
+    [
+        StructField("topic_term", StringType(), False),
+        StructField("topic_key", StringType(), False),
+        StructField("topic_mode", StringType(), False),
+        StructField("topic_label", StringType(), False),
+        StructField("topic_event_count", LongType(), False),
+        StructField("event_id", LongType(), True),
+        StructField("event_meta_id", StringType(), True),
+        StructField("domain", StringType(), True),
+        StructField("article_uri", StringType(), True),
+        StructField("title", StringType(), True),
+        StructField("comment", StringType(), True),
+        StructField("editor_user", StringType(), True),
+        StructField("title_url", StringType(), True),
+        StructField("event_ts", StringType(), True),
+        StructField("silver_ts", StringType(), True),
+        StructField("samples_json", StringType(), False),
+        StructField("silver_topic_ts", StringType(), False),
+        StructField("source_raw_json", StringType(), True),
+    ]
+)
 
 
 def transform_to_silver(bronze_batch_df: DataFrame) -> DataFrame:
@@ -116,9 +148,13 @@ def transform_to_silver(bronze_batch_df: DataFrame) -> DataFrame:
         .withColumn("event_ts", to_timestamp(from_unixtime(col("event_unix_ts"))))
         .withColumn(
             "revert_signal_term",
-            lit("") if not REVERT_SIGNAL_REGEX else regexp_extract(coalesce(col("comment_normalized"), lit("")), REVERT_SIGNAL_REGEX, 1),
+            lit("")
+            if not REVERT_SIGNAL_REGEX
+            else regexp_extract(coalesce(col("comment_normalized"), lit("")), REVERT_SIGNAL_REGEX, 1),
         )
-        .withColumn("is_revert_signal", lit(False) if not REVERT_SIGNAL_REGEX else (col("revert_signal_term") != lit("")))
+        .withColumn(
+            "is_revert_signal", lit(False) if not REVERT_SIGNAL_REGEX else (col("revert_signal_term") != lit(""))
+        )
         .withColumn("silver_ts", current_timestamp())
     )
     return analyze_quality(with_editorial_signals(normalized_df))
@@ -218,7 +254,12 @@ def detect_hot_topic_terms(df: DataFrame) -> List[Dict[str, Any]]:
     for row in title_candidates:
         topic_key = row["editorial_topic_key"]
         topic_label = (row["topic_label"] or "").strip()
-        if not topic_key or not topic_label or looks_like_low_signal_topic(topic_key) or looks_like_low_signal_topic(topic_label):
+        if (
+            not topic_key
+            or not topic_label
+            or looks_like_low_signal_topic(topic_key)
+            or looks_like_low_signal_topic(topic_label)
+        ):
             continue
         selected_topics.append(
             {
@@ -231,7 +272,9 @@ def detect_hot_topic_terms(df: DataFrame) -> List[Dict[str, Any]]:
         )
         selected_keys.add(topic_key)
 
-    selected_topics = sorted(selected_topics, key=lambda item: (item["score"], item["count"], len(item["label"])), reverse=True)
+    selected_topics = sorted(
+        selected_topics, key=lambda item: (item["score"], item["count"], len(item["label"])), reverse=True
+    )
     if len(selected_topics) >= TOPIC_TOP_N:
         return selected_topics[:TOPIC_TOP_N]
 
@@ -241,7 +284,9 @@ def detect_hot_topic_terms(df: DataFrame) -> List[Dict[str, Any]]:
         df.filter(coalesce(col("editorial_priority"), lit(0)) >= 0)
         .select(
             col("event_id"),
-            explode(split(regexp_replace(col("topic_text"), r"[^a-zA-Z0-9áéíóúüñçàèìòùâêîôûãõäëïöÿ\s]", " "), r"\s+")).alias("token"),
+            explode(
+                split(regexp_replace(col("topic_text"), r"[^a-zA-Z0-9áéíóúüñçàèìòùâêîôûãõäëïöÿ\s]", " "), r"\s+")
+            ).alias("token"),
         )
         .filter(col("token") != "")
         .filter(~col("token").rlike(r"^[0-9]+$"))
@@ -293,31 +338,51 @@ def build_topic_candidates(spark: SparkSession, now_utc: datetime) -> Tuple[List
     covered_event_ids = set()
     for topic in hot_terms:
         topic_events_df = (
-            publishable_df.filter(col("editorial_topic_key") == lit(topic["key"]))
-            if topic["mode"] == "title_exact"
-            else publishable_df.filter(col("topic_text").contains(topic["label"]))
-        ).orderBy(col("event_ts").desc()).limit(TOPIC_SAMPLE_SIZE)
+            (
+                publishable_df.filter(col("editorial_topic_key") == lit(topic["key"]))
+                if topic["mode"] == "title_exact"
+                else publishable_df.filter(col("topic_text").contains(topic["label"]))
+            )
+            .orderBy(col("event_ts").desc())
+            .limit(TOPIC_SAMPLE_SIZE)
+        )
 
         sample_rows = topic_events_df.select(
-            "event_id", "event_meta_id", "domain", "article_uri", "title", "comment",
-            "editor_user", "title_url", "event_ts", "silver_ts", "raw_json",
+            "event_id",
+            "event_meta_id",
+            "domain",
+            "article_uri",
+            "title",
+            "comment",
+            "editor_user",
+            "title_url",
+            "event_ts",
+            "silver_ts",
+            "raw_json",
         ).collect()
         if not sample_rows:
             continue
 
         sample_event_ids = {int(row["event_id"]) for row in sample_rows if row["event_id"] is not None}
-        overlap_ratio = len(sample_event_ids.intersection(covered_event_ids)) / len(sample_event_ids) if sample_event_ids else 0.0
+        overlap_ratio = (
+            len(sample_event_ids.intersection(covered_event_ids)) / len(sample_event_ids) if sample_event_ids else 0.0
+        )
         if overlap_ratio >= 0.7:
             continue
 
-        samples = [{"title": row["title"] or "", "comment": row["comment"] or "", "domain": row["domain"] or ""} for row in sample_rows]
+        samples = [
+            {"title": row["title"] or "", "comment": row["comment"] or "", "domain": row["domain"] or ""}
+            for row in sample_rows
+        ]
         representative = sample_rows[0]
         topic_term = topic["label"]
         topic_label = sanitize_topic_label(topic_term, [], representative["domain"])
         if looks_like_low_signal_topic(topic_label):
             continue
 
-        generic_topic_penalty = 1 if looks_like_generic_topic(topic_term) or looks_like_generic_topic(topic_label) else 0
+        generic_topic_penalty = (
+            1 if looks_like_generic_topic(topic_term) or looks_like_generic_topic(topic_label) else 0
+        )
         topic_records.append(
             {
                 "topic_term": topic_term,
@@ -357,20 +422,29 @@ def write_batch_metrics(
     discarded = total - kept
     discarded_pct = (discarded / total * 100.0) if total else 0.0
     processed_at = datetime.now(timezone.utc).isoformat()
-    metrics_schema = StructType([
-        StructField("batch_id", LongType(), False),
-        StructField("total_events", LongType(), False),
-        StructField("kept_events", LongType(), False),
-        StructField("discarded_events", LongType(), False),
-        StructField("discarded_pct", DoubleType(), False),
-        StructField("publishable_events", LongType(), False),
-        StructField("tainted_events", LongType(), False),
-        StructField("topic_candidates", LongType(), False),
-        StructField("processed_at", StringType(), False),
-    ])
+    metrics_schema = StructType(
+        [
+            StructField("batch_id", LongType(), False),
+            StructField("total_events", LongType(), False),
+            StructField("kept_events", LongType(), False),
+            StructField("discarded_events", LongType(), False),
+            StructField("discarded_pct", DoubleType(), False),
+            StructField("publishable_events", LongType(), False),
+            StructField("tainted_events", LongType(), False),
+            StructField("topic_candidates", LongType(), False),
+            StructField("processed_at", StringType(), False),
+        ]
+    )
     row = (
-        int(batch_id), int(total), int(kept), int(discarded), float(discarded_pct),
-        int(publishable), int(tainted), int(topic_candidates), processed_at,
+        int(batch_id),
+        int(total),
+        int(kept),
+        int(discarded),
+        float(discarded_pct),
+        int(publishable),
+        int(tainted),
+        int(topic_candidates),
+        processed_at,
     )
     spark.createDataFrame([row], schema=metrics_schema).write.format("delta").mode("append").save(SILVER_METRICS_PATH)
 
@@ -396,7 +470,9 @@ def main() -> None:
         now_utc = datetime.now(timezone.utc)
         topic_records, publishable_events, tainted_events = build_topic_candidates(spark, now_utc)
         if topic_records:
-            spark.createDataFrame(topic_records, schema=TOPIC_SCHEMA).write.format("delta").mode("append").option("mergeSchema", "true").save(SILVER_TOPICS_PATH)
+            spark.createDataFrame(topic_records, schema=TOPIC_SCHEMA).write.format("delta").mode("append").option(
+                "mergeSchema", "true"
+            ).save(SILVER_TOPICS_PATH)
 
         write_batch_metrics(
             spark,

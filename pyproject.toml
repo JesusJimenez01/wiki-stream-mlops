@@ -1,0 +1,17 @@
+# Tooling configuration only: each service ships its own requirements.txt / Dockerfile.
+
+[tool.ruff]
+line-length = 120
+# Spark jobs run on the apache/spark image (Python 3.10); keep syntax compatible
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "app", "producer", "gold_enrichment", "silver_processing", "mongo_serving"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+markers = ["spark: needs a local Spark + Delta Lake runtime (Java 17+)"]
+addopts = "-ra"

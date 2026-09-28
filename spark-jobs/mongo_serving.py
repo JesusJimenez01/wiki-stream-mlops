@@ -42,10 +42,7 @@ INDEXES_CREATED = False
 
 
 def build_mongo_uri() -> str:
-    return (
-        f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/"
-        "?authSource=admin"
-    )
+    return f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/?authSource=admin"
 
 
 def parse_iso_datetime(value: Any) -> datetime:
@@ -189,7 +186,7 @@ def bootstrap_from_gold(spark: SparkSession) -> None:
 def chunked(rows: List[Dict[str, Any]], size: int) -> List[List[Dict[str, Any]]]:
     """Split rows into bulk-write sized chunks."""
     size = max(size, 1)
-    return [rows[start:start + size] for start in range(0, len(rows), size)]
+    return [rows[start : start + size] for start in range(0, len(rows), size)]
 
 
 def write_batch_to_mongo(batch_df: DataFrame, batch_id: int) -> None:
@@ -209,7 +206,9 @@ def write_batch_to_mongo(batch_df: DataFrame, batch_id: int) -> None:
         raise
 
 
-def read_gold_stream(spark: SparkSession, path: str = GOLD_PATH, starting_version: str = SERVING_STARTING_VERSION) -> DataFrame:
+def read_gold_stream(
+    spark: SparkSession, path: str = GOLD_PATH, starting_version: str = SERVING_STARTING_VERSION
+) -> DataFrame:
     """
     Streaming read of the Gold table.
 
