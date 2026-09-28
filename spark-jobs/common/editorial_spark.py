@@ -3,8 +3,12 @@
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import coalesce, col, concat_ws, length, lit, lower, trim, when
 
-from common.editorial_common import EDITORIAL_NOISE_REGEX, FOREIGN_SCRIPT_REGEX, LOW_SIGNAL_TOPIC_REGEX, TITLE_NAMESPACE_REGEX
-
+from common.editorial_common import (
+    EDITORIAL_NOISE_REGEX,
+    FOREIGN_SCRIPT_REGEX,
+    LOW_SIGNAL_TOPIC_REGEX,
+    TITLE_NAMESPACE_REGEX,
+)
 
 MIN_EDITORIAL_TITLE_LEN = 4
 

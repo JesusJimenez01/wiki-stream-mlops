@@ -39,7 +39,6 @@ if SHARED_HELPERS_DIR.exists():
 
 from common.editorial_common import contains_foreign_script  # noqa: E402
 
-
 MONGO_HOST = os.getenv("MONGO_HOST", "mongodb")
 MONGO_PORT = int(os.getenv("MONGO_PORT", "27017"))
 MONGO_USER = os.getenv("MONGO_INITDB_ROOT_USERNAME", "wikipedia")
@@ -225,7 +224,12 @@ def _safe_datetime(value: Any) -> datetime:
 
 def _topic_distribution(collection) -> List[Dict[str, Any]]:
     pipeline = [
-        {"$group": {"_id": {"topic_term": "$topic_term", "topic_label": "$topic_label", "domain": "$domain"}, "count": {"$sum": 1}}},
+        {
+            "$group": {
+                "_id": {"topic_term": "$topic_term", "topic_label": "$topic_label", "domain": "$domain"},
+                "count": {"$sum": 1},
+            }
+        },
         {"$sort": {"count": -1}},
         {"$limit": 8},
     ]
@@ -405,10 +409,7 @@ def _rank_and_diversify(items: List[Dict[str, Any]], limit: int) -> List[Dict[st
 
 
 def _has_foreign_content(doc: Dict[str, Any]) -> bool:
-    return (
-        contains_foreign_script(doc.get("headline") or "")
-        or contains_foreign_script(doc.get("summary") or "")
-    )
+    return contains_foreign_script(doc.get("headline") or "") or contains_foreign_script(doc.get("summary") or "")
 
 
 @app.get("/health")
@@ -416,7 +417,7 @@ def health() -> Dict[str, str]:
     try:
         _mongo_client().admin.command("ping")
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}")
+        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}") from exc
     return {"status": "ok"}
 
 
@@ -439,11 +440,7 @@ def get_news(
         {"$sort": {"timestamp": -1}},
         {"$limit": candidate_limit},
     ]
-    rows = [
-        _serialize_doc(doc)
-        for doc in collection.aggregate(pipeline)
-        if not _has_foreign_content(doc)
-    ]
+    rows = [_serialize_doc(doc) for doc in collection.aggregate(pipeline) if not _has_foreign_content(doc)]
     rows = _rank_and_diversify(rows, limit)
     return {"items": rows, "count": len(rows)}
 

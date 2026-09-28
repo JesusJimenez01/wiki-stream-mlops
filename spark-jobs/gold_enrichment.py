@@ -94,52 +94,61 @@ SYSTEM_PROMPT = (
     "You are the Editor in Chief of the Breaking News section of a digital newspaper. "
     "Your job is to transform recent Wikipedia changes into short, clear, and engaging news stories.\n\n"
     "EDITORIAL RULES:\n"
-    "0. Language: always draft and return the final content exclusively in natural English. Translate any sample that arrives in another language within this response.\n"
-    "1. Tone: direct, urgent, objective, and impactful. Use active voice. Avoid robotic, academic, or bureaucratic language.\n"
+    "0. Language: always draft and return the final content exclusively in natural English. Translate any sample that "
+    "arrives in another language within this response.\n"
+    "1. Tone: direct, urgent, objective, and impactful. Use active voice. Avoid robotic, academic, or bureaucratic "
+    "language.\n"
     "2. Headline: maximum 10 words. Must capture immediate attention and highlight the real novelty.\n"
     "3. Summary: maximum 3 short sentences. Apply the inverted pyramid: what happened and why it matters.\n"
     "4. Topic_label: return a short label of 2 to 5 words, in natural English, to show as a section or kicker.\n"
     "5. Tags: return an array of 2 to 4 concrete and useful categories, also in English.\n"
-    "6. Quality: avoid generic headlines like 'Wikipedia Update' or empty summaries. Prioritize novelty, impact, conflict, change, or public relevance.\n"
-    "7. Angle: always choose the dominant journalistic angle of the case, for example, breakthrough, crisis, dispute, trend, discovery, market, politics, science, or culture.\n"
-    "8. Framing: do not make the source platform the subject of the news unless the change is literally about it. Avoid repeating Wikipedia, Wikidata, or Wikimedia if the reader understands the piece without that crutch.\n"
-    "9. Rigor: do not invent facts, figures, causes, or consequences that are not supported by the received context. If the context is limited, write conservatively but interestingly.\n"
+    "6. Quality: avoid generic headlines like 'Wikipedia Update' or empty summaries. Prioritize novelty, impact, "
+    "conflict, change, or public relevance.\n"
+    "7. Angle: always choose the dominant journalistic angle of the case, for example, breakthrough, crisis, dispute, "
+    "trend, discovery, market, politics, science, or culture.\n"
+    "8. Framing: do not make the source platform the subject of the news unless the change is literally about it. "
+    "Avoid repeating Wikipedia, Wikidata, or Wikimedia if the reader understands the piece without that crutch.\n"
+    "9. Rigor: do not invent facts, figures, causes, or consequences that are not supported by the received context. "
+    "If the context is limited, write conservatively but interestingly.\n"
     "10. Output: do not leave words in non-Latin alphabets in topic_label, headline, summary, or tags.\n\n"
     "SYSTEM RULE:\n"
-    "You must respond solely and exclusively with a valid JSON object with the keys topic_label, headline, summary, and tags. "
+    "You must respond solely and exclusively with a valid JSON object with the keys topic_label, headline, summary, "
+    "and tags. "
     "Do not add text before or after. Do not use markdown."
 )
 
-GOLD_SCHEMA = StructType([
-    StructField("topic_term", StringType(), True),
-    StructField("topic_label", StringType(), True),
-    StructField("topic_event_count", LongType(), True),
-    StructField("event_id", LongType(), True),
-    StructField("event_meta_id", StringType(), True),
-    StructField("domain", StringType(), True),
-    StructField("article_uri", StringType(), True),
-    StructField("title", StringType(), True),
-    StructField("comment", StringType(), True),
-    StructField("editor_user", StringType(), True),
-    StructField("title_url", StringType(), True),
-    StructField("event_ts", StringType(), True),
-    StructField("silver_ts", StringType(), True),
-    StructField("headline", StringType(), True),
-    StructField("summary", StringType(), True),
-    StructField("tags", ArrayType(StringType()), True),
-    StructField("inference_ok", BooleanType(), False),
-    StructField("inference_error", StringType(), True),
-    StructField("dedup_score", DoubleType(), True),
-    StructField("is_update", BooleanType(), False),
-    StructField("duplicate_of_gold_ts", StringType(), True),
-    StructField("story_id", StringType(), False),
-    StructField("published_at", StringType(), False),
-    StructField("updated_at", StringType(), False),
-    StructField("update_seq", LongType(), False),
-    StructField("is_live_event", BooleanType(), False),
-    StructField("gold_ts", StringType(), False),
-    StructField("source_raw_json", StringType(), True),
-])
+GOLD_SCHEMA = StructType(
+    [
+        StructField("topic_term", StringType(), True),
+        StructField("topic_label", StringType(), True),
+        StructField("topic_event_count", LongType(), True),
+        StructField("event_id", LongType(), True),
+        StructField("event_meta_id", StringType(), True),
+        StructField("domain", StringType(), True),
+        StructField("article_uri", StringType(), True),
+        StructField("title", StringType(), True),
+        StructField("comment", StringType(), True),
+        StructField("editor_user", StringType(), True),
+        StructField("title_url", StringType(), True),
+        StructField("event_ts", StringType(), True),
+        StructField("silver_ts", StringType(), True),
+        StructField("headline", StringType(), True),
+        StructField("summary", StringType(), True),
+        StructField("tags", ArrayType(StringType()), True),
+        StructField("inference_ok", BooleanType(), False),
+        StructField("inference_error", StringType(), True),
+        StructField("dedup_score", DoubleType(), True),
+        StructField("is_update", BooleanType(), False),
+        StructField("duplicate_of_gold_ts", StringType(), True),
+        StructField("story_id", StringType(), False),
+        StructField("published_at", StringType(), False),
+        StructField("updated_at", StringType(), False),
+        StructField("update_seq", LongType(), False),
+        StructField("is_live_event", BooleanType(), False),
+        StructField("gold_ts", StringType(), False),
+        StructField("source_raw_json", StringType(), True),
+    ]
+)
 
 
 def maybe_disable_thinking(prompt: str) -> str:
@@ -217,7 +226,12 @@ def enforce_human_framing(
     summary_norm = normalize_brief_text(clean_summary)
     looks_robotic_summary = any(phrase in summary_norm for phrase in ROBOTIC_SUMMARY_PHRASES)
 
-    if not clean_summary or looks_collective_summary(clean_summary) or looks_robotic_summary or contains_foreign_script(clean_summary):
+    if (
+        not clean_summary
+        or looks_collective_summary(clean_summary)
+        or looks_robotic_summary
+        or contains_foreign_script(clean_summary)
+    ):
         clean_summary = (
             f"Recent changes linked to {anchor} have been registered. "
             "The update gains informative relevance at this time."
@@ -229,24 +243,31 @@ def enforce_human_framing(
 
 def build_topic_prompt(topic_term: str, topic_event_count: int, samples: List[Dict[str, str]]) -> str:
     sample_lines = [
-        f"- title: {sample.get('title', '')} | comment: {sample.get('comment', '')} | domain: {sample.get('domain', '')}"
+        f"- title: {sample.get('title', '')} | comment: {sample.get('comment', '')} "
+        f"| domain: {sample.get('domain', '')}"
         for sample in samples
     ]
     context_block = "\n".join(sample_lines) if sample_lines else "- no samples"
     source_label = resolve_source_label(samples)
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        "You receive a topic already curated by the analytical layer. Write a human news story focused on a specific protagonist.\n"
+        "You receive a topic already curated by the analytical layer. Write a human news story focused on a specific "
+        "protagonist.\n"
         f"Predominant source project: {source_label}\n"
         f"Recurring topic: {topic_term}\n"
         f"Related events: {topic_event_count}\n"
         "Sample changes:\n"
         f"{context_block}\n\n"
-        "The headline must start with the main protagonist (person, team, mission, institution, work, or specific place).\n"
-        "Forbidden to open with collective or technical approaches like 'Update', 'Several articles', 'Trend', or 'Changes detected'.\n"
-        "Do not attribute the edit to the protagonist with phrases like 'X updates their biography'; present the fact as editorial changes to their public coverage.\n"
-        "If technical noise or text in non-Latin alphabets appears in samples/categories, ignore it and do not copy it into the output.\n"
-        "Do not open the headline with 'Wikipedia', 'Wikidata', or 'Wikimedia' unless the news event is the platform itself.\n"
+        "The headline must start with the main protagonist (person, team, mission, institution, work, or specific "
+        "place).\n"
+        "Forbidden to open with collective or technical approaches like 'Update', 'Several articles', 'Trend', or "
+        "'Changes detected'.\n"
+        "Do not attribute the edit to the protagonist with phrases like 'X updates their biography'; present the fact "
+        "as editorial changes to their public coverage.\n"
+        "If technical noise or text in non-Latin alphabets appears in samples/categories, ignore it and do not copy it "
+        "into the output.\n"
+        "Do not open the headline with 'Wikipedia', 'Wikidata', or 'Wikimedia' unless the news event is the platform "
+        "itself.\n"
         "Return exclusively the JSON."
     )
     return maybe_disable_thinking(prompt)
@@ -259,7 +280,7 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
-            raise ValueError("No valid JSON found in the model's response")
+            raise ValueError("No valid JSON found in the model's response") from None
         payload = json.loads(match.group(0))
     if not isinstance(payload, dict):
         raise ValueError("The model's response is not a JSON object")
@@ -280,7 +301,9 @@ def normalize_model_output(payload: Dict[str, Any]) -> Tuple[str, str, str, List
     return topic_label, headline, summary, tags or ["news"]
 
 
-def call_ollama(prompt: str, topic_term: str, samples: List[Dict[str, str]]) -> Tuple[str, str, str, List[str], bool, Optional[str]]:
+def call_ollama(
+    prompt: str, topic_term: str, samples: List[Dict[str, str]]
+) -> Tuple[str, str, str, List[str], bool, Optional[str]]:
     request = Request(
         f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
         data=json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"}).encode("utf-8"),
@@ -290,8 +313,12 @@ def call_ollama(prompt: str, topic_term: str, samples: List[Dict[str, str]]) -> 
     try:
         with urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
             response_obj = json.loads(response.read().decode("utf-8"))
-        topic_label, headline, summary, tags = normalize_model_output(extract_json_object(str(response_obj.get("response", "")).strip()))
-        topic_label, headline, summary, tags = enforce_human_framing(topic_term, samples, topic_label, headline, summary, tags)
+        topic_label, headline, summary, tags = normalize_model_output(
+            extract_json_object(str(response_obj.get("response", "")).strip())
+        )
+        topic_label, headline, summary, tags = enforce_human_framing(
+            topic_term, samples, topic_label, headline, summary, tags
+        )
         combined = " ".join([topic_label, headline, summary, " ".join(tags)]).strip()
         if contains_foreign_script(combined):
             raise ValueError("The model's response was not completely in English")
@@ -320,23 +347,33 @@ def write_metrics(
     updates: int = 0,
 ) -> None:
     failed = generated - success
-    metrics_schema = StructType([
-        StructField("batch_id", LongType(), False),
-        StructField("total_events", LongType(), False),
-        StructField("generated_events", LongType(), False),
-        StructField("success_events", LongType(), False),
-        StructField("failed_events", LongType(), False),
-        StructField("failed_pct", DoubleType(), False),
-        StructField("dedup_discarded_events", LongType(), False),
-        StructField("update_events", LongType(), False),
-        StructField("processed_at", StringType(), False),
-    ])
-    row = (
-        int(batch_id), int(total), int(generated), int(success), int(failed),
-        (failed / generated * 100.0) if generated else 0.0,
-        int(dedup_discarded), int(updates), datetime.now(timezone.utc).isoformat(),
+    metrics_schema = StructType(
+        [
+            StructField("batch_id", LongType(), False),
+            StructField("total_events", LongType(), False),
+            StructField("generated_events", LongType(), False),
+            StructField("success_events", LongType(), False),
+            StructField("failed_events", LongType(), False),
+            StructField("failed_pct", DoubleType(), False),
+            StructField("dedup_discarded_events", LongType(), False),
+            StructField("update_events", LongType(), False),
+            StructField("processed_at", StringType(), False),
+        ]
     )
-    spark.createDataFrame([row], schema=metrics_schema).write.format("delta").mode("append").option("mergeSchema", "true").save(GOLD_METRICS_PATH)
+    row = (
+        int(batch_id),
+        int(total),
+        int(generated),
+        int(success),
+        int(failed),
+        (failed / generated * 100.0) if generated else 0.0,
+        int(dedup_discarded),
+        int(updates),
+        datetime.now(timezone.utc).isoformat(),
+    )
+    spark.createDataFrame([row], schema=metrics_schema).write.format("delta").mode("append").option(
+        "mergeSchema", "true"
+    ).save(GOLD_METRICS_PATH)
 
 
 def normalize_similarity_text(text: str) -> str:
@@ -369,7 +406,12 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def should_allow_update(now_utc: datetime, previous_gold_ts: Optional[str], previous_topic_event_count: Optional[int], current_topic_event_count: int) -> bool:
+def should_allow_update(
+    now_utc: datetime,
+    previous_gold_ts: Optional[str],
+    previous_topic_event_count: Optional[int],
+    current_topic_event_count: int,
+) -> bool:
     previous_dt = parse_iso_datetime(previous_gold_ts)
     if previous_dt is None:
         return False
@@ -384,13 +426,26 @@ def load_recent_topic_candidates(spark: SparkSession, topic_terms: List[str]) ->
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=GOLD_DEDUP_LOOKBACK_HOURS)).isoformat()
     try:
         gold_df = spark.read.format("delta").load(GOLD_OUTPUT_PATH)
-        for missing_col, default_expr in [("story_id", lit(None).cast("string")), ("published_at", lit(None).cast("string")), ("update_seq", lit(0).cast("long"))]:
+        for missing_col, default_expr in [
+            ("story_id", lit(None).cast("string")),
+            ("published_at", lit(None).cast("string")),
+            ("update_seq", lit(0).cast("long")),
+        ]:
             if missing_col not in gold_df.columns:
                 gold_df = gold_df.withColumn(missing_col, default_expr)
         candidates_df = (
             gold_df.filter(col("topic_term").isin(topic_terms))
             .filter(col("gold_ts") >= cutoff_iso)
-            .select("topic_term", "topic_event_count", "headline", "summary", "gold_ts", "story_id", "published_at", "update_seq")
+            .select(
+                "topic_term",
+                "topic_event_count",
+                "headline",
+                "summary",
+                "gold_ts",
+                "story_id",
+                "published_at",
+                "update_seq",
+            )
             .orderBy(desc("gold_ts"))
             .limit(GOLD_DEDUP_MAX_CANDIDATES)
         )
@@ -429,7 +484,9 @@ def find_recent_publication(topic_candidates: List[Dict[str, Any]], now_utc: dat
     return None
 
 
-def evaluate_duplicate_news(topic_event_count: int, headline: str, summary: str, topic_candidates: List[Dict[str, Any]], now_utc: datetime) -> Tuple[bool, float, Optional[str], bool]:
+def evaluate_duplicate_news(
+    topic_event_count: int, headline: str, summary: str, topic_candidates: List[Dict[str, Any]], now_utc: datetime
+) -> Tuple[bool, float, Optional[str], bool]:
     if not topic_candidates:
         return False, 0.0, None, False
     recent_gold_ts = find_recent_publication(topic_candidates, now_utc)
@@ -454,9 +511,15 @@ def evaluate_duplicate_news(topic_event_count: int, headline: str, summary: str,
         if score > best_score:
             best_score = score
             best_match_ts = candidate.get("gold_ts")
-        if headline_sim < GOLD_HEADLINE_SIM_THRESHOLD and summary_sim < GOLD_SUMMARY_SIM_THRESHOLD and token_sim < GOLD_TOKEN_JACCARD_THRESHOLD:
+        if (
+            headline_sim < GOLD_HEADLINE_SIM_THRESHOLD
+            and summary_sim < GOLD_SUMMARY_SIM_THRESHOLD
+            and token_sim < GOLD_TOKEN_JACCARD_THRESHOLD
+        ):
             continue
-        if should_allow_update(now_utc, candidate.get("gold_ts"), candidate.get("topic_event_count"), topic_event_count):
+        if should_allow_update(
+            now_utc, candidate.get("gold_ts"), candidate.get("topic_event_count"), topic_event_count
+        ):
             should_mark_as_update = True
             continue
         return True, score, candidate.get("gold_ts"), False
@@ -495,7 +558,10 @@ def conclude_stale_stories(spark: SparkSession) -> int:
         target_count = gold_df.filter(col("is_live_event") & (col("updated_at") < cutoff_iso)).count()
         if target_count == 0:
             return 0
-        spark.sql(f"UPDATE delta.`{GOLD_OUTPUT_PATH}` SET is_live_event = false WHERE is_live_event = true AND updated_at < '{cutoff_iso}'")
+        spark.sql(
+            f"UPDATE delta.`{GOLD_OUTPUT_PATH}` SET is_live_event = false "
+            f"WHERE is_live_event = true AND updated_at < '{cutoff_iso}'"
+        )
         logger.info("Concluded %s stale live stories (cutoff=%s)", target_count, cutoff_iso)
         return target_count
     except Exception as exc:
@@ -509,7 +575,9 @@ def main() -> None:
 
     logger.info("Starting Gold enrichment from %s", SILVER_TOPICS_PATH)
     wait_for_delta_source(spark, SILVER_TOPICS_PATH, "Silver topics")
-    topics_stream_df = spark.readStream.format("delta").option("startingVersion", GOLD_STARTING_VERSION).load(SILVER_TOPICS_PATH)
+    topics_stream_df = (
+        spark.readStream.format("delta").option("startingVersion", GOLD_STARTING_VERSION).load(SILVER_TOPICS_PATH)
+    )
 
     def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         incoming_topics = batch_df.count()
@@ -522,7 +590,11 @@ def main() -> None:
             logger.info("batch=%s concluded_stale=%s", batch_id, concluded)
 
         now_utc = datetime.now(timezone.utc)
-        topic_rows = batch_df.orderBy(desc("silver_topic_ts"), desc("topic_event_count")).limit(GOLD_MAX_EVENTS_PER_BATCH).collect()
+        topic_rows = (
+            batch_df.orderBy(desc("silver_topic_ts"), desc("topic_event_count"))
+            .limit(GOLD_MAX_EVENTS_PER_BATCH)
+            .collect()
+        )
         recent_candidates_by_topic = load_recent_topic_candidates(spark, [row["topic_term"] for row in topic_rows])
 
         topic_news_records: List[Dict[str, Any]] = []
@@ -644,7 +716,13 @@ def main() -> None:
         .start()
     )
 
-    logger.info("Gold enrichment started → output=%s source=%s model=%s trigger=%s", GOLD_OUTPUT_PATH, SILVER_TOPICS_PATH, OLLAMA_MODEL, TRIGGER_INTERVAL)
+    logger.info(
+        "Gold enrichment started → output=%s source=%s model=%s trigger=%s",
+        GOLD_OUTPUT_PATH,
+        SILVER_TOPICS_PATH,
+        OLLAMA_MODEL,
+        TRIGGER_INTERVAL,
+    )
     query.awaitTermination()
 
 

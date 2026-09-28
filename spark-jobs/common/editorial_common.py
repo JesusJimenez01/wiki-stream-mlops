@@ -3,7 +3,6 @@
 import re
 from typing import Any, Dict, List, Optional
 
-
 KNOWN_NAMESPACE_PREFIXES = (
     "category",
     "categories",
@@ -53,7 +52,9 @@ KNOWN_NAMESPACE_PREFIXES = (
 
 GENERIC_NAMESPACE_REGEX = r"^[^\s:]{1,30}:"
 TITLE_NAMESPACE_REGEX = r"^(?:" + "|".join(re.escape(prefix) for prefix in KNOWN_NAMESPACE_PREFIXES) + r"):"
-FOREIGN_SCRIPT_REGEX = r"[\u0400-\u052F\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u0D7F\u3040-\u30FF\u3400-\u9FFF]"
+FOREIGN_SCRIPT_REGEX = (
+    r"[\u0400-\u052F\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u0D7F\u3040-\u30FF\u3400-\u9FFF]"
+)
 EDITORIAL_NOISE_REGEX = (
     r"(^|[^a-z0-9])(q\d+|p\d+|special|create|property|batch|short|removed|"
     r"quickstatements|wbeditentity|toollabs|wikidata|wikimedia|commons)([^a-z0-9]|$)"
@@ -124,7 +125,6 @@ GENERIC_TOPIC_TERMS = {
     "diccionario",
     "diccionarios",
     "historia",
-    "historical",
     "items",
 }
 

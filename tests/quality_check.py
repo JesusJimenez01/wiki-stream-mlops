@@ -2,9 +2,8 @@ import os
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, lower, trim, coalesce, lit
-from pyspark.sql.types import StructType, StructField, LongType, StringType, BooleanType
-
+from pyspark.sql.functions import coalesce, col, from_json, lit, lower, trim
+from pyspark.sql.types import BooleanType, LongType, StringType, StructField, StructType
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "wikipedia")
@@ -70,8 +69,8 @@ def main() -> None:
     )
 
     bronze_total = bronze_compact.count()
-    bronze_bot = bronze_compact.filter(coalesce(col("bot"), lit(False)) == True).count()
-    bronze_minor = bronze_compact.filter(coalesce(col("minor"), lit(False)) == True).count()
+    bronze_bot = bronze_compact.filter(coalesce(col("bot"), lit(False))).count()
+    bronze_minor = bronze_compact.filter(coalesce(col("minor"), lit(False))).count()
 
     silver = spark.read.format("delta").load(f"s3a://{MINIO_BUCKET}/silver/wiki_clean")
     for missing_col, default_expr in [
@@ -86,8 +85,7 @@ def main() -> None:
 
     silver_total = silver.count()
     silver_bad_bot_minor = silver.filter(
-        (coalesce(col("bot"), lit(False)) == True)
-        | (coalesce(col("minor"), lit(False)) == True)
+        (coalesce(col("bot"), lit(False))) | (coalesce(col("minor"), lit(False)))
     ).count()
 
     silver_bad_normalization = silver.filter(
@@ -102,11 +100,8 @@ def main() -> None:
     ).count()
 
     silver_bad_editorial_topic = silver.filter(
-        (col("is_editorial_topic_candidate") == True)
-        & (
-            col("editorial_topic_key").isNull()
-            | col("editorial_topic_label").isNull()
-        )
+        col("is_editorial_topic_candidate")
+        & (col("editorial_topic_key").isNull() | col("editorial_topic_label").isNull())
     ).count()
 
     print("=== WIKI QUALITY CHECK ===")
