@@ -196,6 +196,7 @@ const App = {
                 + '<div class="article-byline">'
                 +   'By <strong>Wikipedia Newsroom</strong> &mdash; ' + esc(dateStr) + '<br>'
                 +   'Dispatch: ' + esc(story.domain) + ' &bull; ' + esc(story.topic_event_count) + ' related events'
+                +   (story.topic_editor_count ? ' by ' + esc(story.topic_editor_count) + ' editors' : '')
                 + '</div>'
                 + '<div class="article-body"><p>' + esc(story.summary) + '</p></div>'
                 + '<div class="article-tags">' + tags + '</div>'

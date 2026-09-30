@@ -28,6 +28,10 @@ def with_editorial_signals(df: DataFrame) -> DataFrame:
     title_is_namespace = title_normalized.rlike(TITLE_NAMESPACE_REGEX) | (
         title_has_foreign_script & title_normalized.contains(":")
     )
+    if "namespace" in result_df.columns:
+        # The event says which namespace the page lives in; the title regex is only a
+        # fallback for rows without it (e.g. Gold documents or legacy Silver data).
+        title_is_namespace = when(col("namespace").isNotNull(), col("namespace") != 0).otherwise(title_is_namespace)
     title_is_numeric = title_normalized.rlike(r"^[0-9]+$")
     has_editorial_noise = analysis_text.rlike(EDITORIAL_NOISE_REGEX)
     is_low_signal_topic = title_normalized.rlike(LOW_SIGNAL_TOPIC_REGEX)

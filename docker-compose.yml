@@ -13,6 +13,19 @@ x-spark-image: &spark-image
     context: ./spark-jobs
     dockerfile: Dockerfile
 
+# ── News selection settings shared by Silver and the selection lab ──
+x-silver-selection-env: &silver-selection-env
+  SILVER_REVERT_SIGNAL_REGEX: ${SILVER_REVERT_SIGNAL_REGEX:-.*\b(undid revision|revert(?:ed|ing)? .*edit(?:s)? by)\b.*}
+  SILVER_ALLOWED_WIKIS: ${SILVER_ALLOWED_WIKIS:-enwiki}
+  SILVER_ALLOWED_TYPES: ${SILVER_ALLOWED_TYPES:-edit,new}
+  SILVER_ALLOWED_NAMESPACES: ${SILVER_ALLOWED_NAMESPACES:-0}
+  SILVER_EVENT_HOLD_MINUTES: ${SILVER_EVENT_HOLD_MINUTES:-5}
+  SILVER_TOPIC_LOOKBACK_MINUTES: ${SILVER_TOPIC_LOOKBACK_MINUTES:-30}
+  SILVER_TOPIC_TOP_N: ${SILVER_TOPIC_TOP_N:-5}
+  SILVER_TOPIC_MIN_EDITS: ${SILVER_TOPIC_MIN_EDITS:-5}
+  SILVER_TOPIC_MIN_EDITORS: ${SILVER_TOPIC_MIN_EDITORS:-3}
+  SILVER_TOPIC_SAMPLE_SIZE: ${SILVER_TOPIC_SAMPLE_SIZE:-12}
+
 services:
 
   # --------------------------------------------------------
@@ -344,12 +357,12 @@ services:
         --conf spark.executor.cores=1
         /opt/spark-jobs/silver_processing.py
     environment:
-      - MINIO_ENDPOINT=http://minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-wikipedia}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wikipedia123}
-      - MINIO_BUCKET=${MINIO_BUCKET:-lakehouse}
-      - SILVER_TRIGGER_INTERVAL=${SILVER_TRIGGER_INTERVAL:-30 seconds}
-      - SILVER_REVERT_SIGNAL_REGEX=${SILVER_REVERT_SIGNAL_REGEX:-.*\b(undid revision|revert(?:ed|ing)? .*edit(?:s)? by)\b.*}
+      <<: *silver-selection-env
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wikipedia}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wikipedia123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lakehouse}
+      SILVER_TRIGGER_INTERVAL: ${SILVER_TRIGGER_INTERVAL:-30 seconds}
     volumes:
       - ./spark-jobs:/opt/spark-jobs
       - ./tests:/opt/tests
@@ -411,6 +424,11 @@ services:
       - GOLD_MIN_UPDATE_INTERVAL_MINUTES=${GOLD_MIN_UPDATE_INTERVAL_MINUTES:-45}
       - GOLD_MIN_TOPIC_COUNT_DELTA=${GOLD_MIN_TOPIC_COUNT_DELTA:-5}
       - GOLD_STORY_STALE_HOURS=${GOLD_STORY_STALE_HOURS:-12}
+      - GOLD_WIKI_CONTEXT_ENABLED=${GOLD_WIKI_CONTEXT_ENABLED:-true}
+      - GOLD_CONTEXT_MAX_DIFFS=${GOLD_CONTEXT_MAX_DIFFS:-3}
+      - GOLD_CONTEXT_MAX_CHARS=${GOLD_CONTEXT_MAX_CHARS:-1500}
+      - WIKI_API_TIMEOUT_SECONDS=${WIKI_API_TIMEOUT_SECONDS:-5}
+      - WIKI_USER_AGENT=${WIKI_USER_AGENT:-wiki-stream-mlops/1.0 (https://github.com/JesusJimenez01/wiki-stream-mlops)}
     volumes:
       - ./spark-jobs:/opt/spark-jobs
       - ./tests:/opt/tests
@@ -426,6 +444,36 @@ services:
         condition: service_started
       ollama:
         condition: service_healthy
+    networks:
+      - wiki-net
+
+  # --------------------------------------------------------
+  # SELECTION LAB — offline evaluation of the news selection
+  # Not started by `up`: docker compose run --rm selection-lab --help
+  # --------------------------------------------------------
+  selection-lab:
+    <<: *spark-image
+    container_name: wiki-selection-lab
+    profiles: ["tools"]
+    user: root
+    entrypoint:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --driver-memory
+      - ${SELECTION_LAB_DRIVER_MEMORY:-3g}
+      - /opt/tools/offline_topics.py
+    command: ["--help"]
+    environment:
+      <<: *silver-selection-env
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wikipedia}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wikipedia123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lakehouse}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+      - ./tools:/opt/tools
+      - ./data:/opt/data
     networks:
       - wiki-net
 

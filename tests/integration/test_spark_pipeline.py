@@ -109,43 +109,132 @@ def test_plain_delta_stream_fails_on_update(spark, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _event(event_id, title, comment="", bot=False, minor=False):
-    return json.dumps(
-        {
-            "id": event_id,
-            "title": title,
-            "comment": comment,
-            "user": "editor",
-            "bot": bot,
-            "minor": minor,
-            "timestamp": 1790000000 + event_id,
-            "title_url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
-            "meta": {"id": f"meta-{event_id}", "domain": "en.wikipedia.org", "uri": "u", "dt": "d"},
-        }
-    )
+def _event(event_id, title, comment="", bot=False, minor=False, user="editor", **fields):
+    change = {
+        "id": event_id,
+        "type": "edit",
+        "namespace": 0,
+        "wiki": "enwiki",
+        "server_name": "en.wikipedia.org",
+        "title": title,
+        "comment": comment,
+        "user": user,
+        "bot": bot,
+        "minor": minor,
+        "timestamp": 1790000000 + event_id,
+        "title_url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
+        "length": {"old": 1000, "new": 1000 + 10 * event_id},
+        "revision": {"old": 5000 + event_id, "new": 6000 + event_id},
+        "meta": {"id": f"meta-{event_id}", "domain": "en.wikipedia.org", "uri": "u", "dt": "d"},
+    }
+    change.update(fields)
+    return json.dumps(change)
 
 
-def test_silver_filters_bots_and_minor_edits_and_classifies_the_rest(spark):
+def _bronze(spark, events):
     from pyspark.sql.functions import current_timestamp
 
+    bronze = spark.createDataFrame([(event,) for event in events], "raw_json string")
+    return bronze.withColumn("kafka_timestamp", current_timestamp()).withColumn("ingestion_ts", current_timestamp())
+
+
+def test_silver_keeps_human_article_edits_and_classifies_them(spark):
     import silver_processing
 
-    raw = [
-        (_event(1, "Artemis II", "Added crew details"),),
-        (_event(2, "Artemis II", "Automated fix", bot=True),),
-        (_event(3, "Artemis II", "typo", minor=True),),
-        (_event(4, "Category:Spaceflight", "Added page"),),
-        (_event(5, "Orion (spacecraft)", "Undid revision 123 by Vandal"),),
-        (_event(6, "12345", "stats"),),
+    events = [
+        _event(1, "Artemis II", "Added crew details"),
+        _event(2, "Artemis II", "Automated fix", bot=True),
+        _event(3, "Artemis II", "typo", minor=True),
+        _event(4, "Category:Spaceflight", "Added page", namespace=14),
+        _event(5, "Orion (spacecraft)", "Undid revision 123 by Vandal"),
+        _event(6, "12345", "stats"),
+        _event(7, "Q42", "wbeditentity-update", wiki="wikidatawiki", server_name="www.wikidata.org"),
+        _event(8, "Artemis II", "[[:Artemis II]] added to category", type="categorize"),
+        _event(9, "Artemis II", "New article", type="new", length={"new": 2500}, revision={"new": 7000}),
     ]
-    bronze = spark.createDataFrame(raw, "raw_json string").withColumn("kafka_timestamp", current_timestamp())
-    bronze = bronze.withColumn("ingestion_ts", current_timestamp())
 
-    rows = {row.event_id: row for row in silver_processing.transform_to_silver(bronze).collect()}
+    # Explicit defaults: the module-level config depends on the environment of the test run
+    config = silver_processing.SelectionConfig()
+    silver_rows = silver_processing.transform_to_silver(_bronze(spark, events), config).collect()
+    rows = {row.event_id: row for row in silver_rows}
 
-    assert set(rows) == {1, 4, 5, 6}  # bot and minor edits are dropped
+    # bots, minor edits, other wikis, categorisation events and non-article namespaces are dropped
+    assert set(rows) == {1, 5, 6, 9}
     assert rows[1].moderation_status == "publishable" and rows[1].is_publishable_candidate
-    assert rows[4].moderation_status == "namespace" and not rows[4].is_publishable_candidate
     assert rows[5].moderation_status == "revert_signal" and not rows[5].is_publishable_candidate
     assert rows[6].moderation_status == "numeric"
     assert rows[1].editorial_topic_key == "artemis ii"
+    assert (rows[1].rev_old, rows[1].rev_new, rows[1].byte_delta) == (5001, 6001, 10)
+    assert (rows[9].change_type, rows[9].rev_old, rows[9].byte_delta) == ("new", None, 2500)
+
+
+def test_silver_filter_is_configurable(spark):
+    import silver_processing
+    from common.editorial_common import ChangeFilter
+
+    config = silver_processing.SelectionConfig(change_filter=ChangeFilter.from_settings("*", "*", "*"))
+    events = [
+        _event(1, "Category:Spaceflight", "Added page", namespace=14),
+        _event(2, "Q42", "update", wiki="wikidatawiki", server_name="www.wikidata.org"),
+    ]
+
+    silver_rows = silver_processing.transform_to_silver(_bronze(spark, events), config).collect()
+    rows = {row.event_id: row for row in silver_rows}
+
+    assert set(rows) == {1, 2}
+    # the structured namespace, not the title, marks non-article pages
+    assert rows[1].moderation_status == "namespace"
+    assert rows[2].moderation_status != "namespace"
+
+
+def test_bursts_need_distinct_editors_and_skip_reverted_articles(spark):
+    from datetime import datetime, timedelta, timezone
+
+    import silver_processing
+
+    events = []
+    # Breaking news: 5 edits by 4 different people
+    for offset, user in enumerate(["ana", "ben", "cai", "dee", "ana"]):
+        events.append(_event(10 + offset, "Hurricane Milton", "Landfall update", user=user))
+    # One person saving a draft many times: busy, but not news
+    for offset in range(8):
+        events.append(_event(20 + offset, "Solo Draft Topic", "Expanding", user="solo"))
+    # A crowd edit that gets reverted during the hold period
+    for offset, user in enumerate(["eve", "fox", "gus", "hal", "eve"]):
+        events.append(_event(30 + offset, "Artemis II", "Crew rumour", user=user))
+    events.append(_event(40, "Artemis II", "Undid revision 6034 by Eve", user="ivy"))
+
+    config = silver_processing.SelectionConfig(min_edits=5, min_editors=3, lookback_minutes=30, hold_minutes=5)
+    silver_df = silver_processing.transform_to_silver(_bronze(spark, events), config).cache()
+    now = datetime.fromtimestamp(1790000000, tz=timezone.utc) + timedelta(minutes=10)
+
+    publishable_df, tainted = silver_processing.publishable_events(silver_df, now, config)
+    records = silver_processing.build_topic_records(publishable_df, now, config)
+
+    assert tainted == 5
+    assert [record["topic_label"] for record in records] == ["Hurricane Milton"]
+    milton = records[0]
+    assert (milton["topic_event_count"], milton["topic_editor_count"]) == (5, 4)
+    assert milton["topic_bytes_added"] == sum(10 * event_id for event_id in range(10, 15))
+    samples = json.loads(milton["samples_json"])
+    assert {sample["rev_new"] for sample in samples} == {6010, 6011, 6012, 6013, 6014}
+    assert all(sample["server_name"] == "en.wikipedia.org" for sample in samples)
+
+
+def test_offline_selection_tool_replays_a_recorded_sample(spark, tmp_path):
+    import offline_topics
+
+    sample = tmp_path / "sample.jsonl"
+    lines = [_event(10 + i, "Hurricane Milton", "Landfall", user=f"user{i}") for i in range(5)]
+    lines += [_event(20 + i, "Solo Draft Topic", "Expanding", user="solo") for i in range(8)]
+    sample.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = tmp_path / "candidates.csv"
+
+    exit_code = offline_topics.main(
+        ["select", "--input", str(sample), "--out", str(out), "--min-editors", "3", "--min-edits", "5"]
+    )
+
+    rows = offline_topics.read_rows(str(out))
+    assert exit_code == 0
+    assert [row["topic_label"] for row in rows] == ["Hurricane Milton"]
+    assert rows[0]["peak_editors"] == "5" and rows[0]["newsworthy"] == ""

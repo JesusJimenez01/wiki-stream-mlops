@@ -2,7 +2,7 @@ import os
 import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, length, size
+from pyspark.sql.functions import avg, coalesce, col, length, lit, size
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "wikipedia")
@@ -34,11 +34,16 @@ def main() -> None:
     gold = spark.read.format("delta").load(f"s3a://{MINIO_BUCKET}/gold/wiki_news")
     if "topic_label" not in gold.columns:
         gold = gold.withColumn("topic_label", col("topic_term"))
+    if "grounded" not in gold.columns:  # stories written before grounding existed
+        gold = gold.withColumn("grounded", lit(None).cast("boolean"))
     gold_snapshot = gold.cache()
 
     total = gold_snapshot.count()
     success = gold_snapshot.filter(col("inference_ok")).count()
     fallback = gold_snapshot.filter(~col("inference_ok")).count()
+    # Model answered, but the editorial guardrails had to template the headline/summary
+    rejected = gold_snapshot.filter(col("inference_error").startswith("Rejected")).count()
+    grounded = gold_snapshot.filter(col("inference_ok") & coalesce(col("grounded"), lit(False))).count()
     empty_headline = gold_snapshot.filter((col("headline").isNull()) | (length(col("headline")) == 0)).count()
     empty_summary = gold_snapshot.filter((col("summary").isNull()) | (length(col("summary")) == 0)).count()
     empty_tags = gold_snapshot.filter(col("tags").isNull() | (size(col("tags")) == 0)).count()
@@ -55,6 +60,8 @@ def main() -> None:
         ("SUCCESS_INFERENCE", success),
         ("FALLBACK_INFERENCE", fallback),
         ("SUCCESS_RATE", f"{success_rate * 100.0:.2f}%"),
+        ("GUARDRAIL_REJECTED", rejected),
+        ("GROUNDED_SUCCESS_RATE", f"{(grounded / success * 100.0) if success else 0.0:.2f}%"),
         ("EMPTY_HEADLINE", empty_headline),
         ("EMPTY_SUMMARY", empty_summary),
         ("EMPTY_TAGS", empty_tags),

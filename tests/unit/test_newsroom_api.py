@@ -91,6 +91,15 @@ def test_story_returns_latest_update(client, collection):
 
     assert story["update_seq"] == 3
     assert collection.find_one.call_args.kwargs["sort"] == [("update_seq", -1)]
+    assert (story["topic_editor_count"], story["grounded"]) == (0, False)  # stories stored before these fields
+
+
+def test_story_exposes_editor_count_and_grounding(client, collection):
+    collection.find_one.return_value = _doc("abc", "moon", "Crew named", topic_editor_count=6, grounded=True)
+
+    story = client.get("/api/news/abc").json()
+
+    assert (story["topic_editor_count"], story["grounded"]) == (6, True)
 
 
 def test_http_metrics_use_route_templates_not_raw_ids(client, collection):

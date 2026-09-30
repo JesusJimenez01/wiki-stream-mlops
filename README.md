@@ -16,10 +16,14 @@ A real-time data platform that transforms Wikipedia edits into automatically gen
 
 * **End-to-end streaming pipeline**: 19 services orchestrated with Docker Compose, from a live
   Wikimedia event stream to a web newsroom, with a medallion lakehouse (Delta Lake on MinIO) in between.
-* **Editorial intelligence before the LLM**: bots, minor edits, namespaces and reverted edits are
-  filtered in Silver; only topics that survive a maturation window reach the model.
-* **Local LLM with guardrails**: news drafted by Ollama (`qwen3:8b`), then validated (JSON contract,
-  language, framing) with a deterministic fallback so a bad answer never breaks a micro-batch.
+* **Editorial intelligence before the LLM**: Silver keeps human edits to encyclopedia articles using the
+  event's structured fields (`wiki`, `type`, `namespace`), drops edits reverted during a maturation window and
+  ranks articles by how many *different* editors converge on them, the classic breaking-news signal.
+* **Grounded local LLM with guardrails**: news drafted by Ollama (`qwen3:8b`) from the article's lead and the
+  text the edits actually added (Wikimedia REST API), constrained by a JSON schema; templated or off-language
+  answers are never published as a success, and a failure never breaks a micro-batch.
+* **Measurable selection**: offline tools record the live stream and replay it through the production Silver
+  code, so thresholds are tuned by measuring precision on labelled samples instead of by eye.
 * **Story lifecycle**: deduplication, controlled updates of live stories and idempotent publishing
   (`story_id:update_seq`), so replays never duplicate news.
 * **Full observability**: provisioned Grafana dashboards for the pipeline, the infrastructure (host,
@@ -72,11 +76,13 @@ flowchart LR
    * `spark-jobs/bronze_ingestion.py` persists raw events to Delta Lake (MinIO).
 
 3. **Silver (curation + topic discovery)**
-   * `spark-jobs/silver_processing.py` cleans, normalizes, and implements an analytics layer to select publishable topics.
+   * `spark-jobs/silver_processing.py` keeps human article edits, classifies noise and detects editing bursts
+     (see [5.1 How a Story Is Selected](#51-how-a-story-is-selected)).
    * Generates `silver/wiki_clean` and `silver/wiki_topics`.
 
 4. **Gold (AI newsroom)**
-   * `spark-jobs/gold_enrichment.py` consumes Silver topics and calls Ollama.
+   * `spark-jobs/gold_enrichment.py` consumes Silver topics, fetches the article lead and the latest diffs
+     (`spark-jobs/common/wiki_context.py`) and calls Ollama.
    * Applies deduplication, update control, and story lifecycle management.
    * Generates `gold/wiki_news` and inference metrics.
 
@@ -93,8 +99,8 @@ flowchart LR
 1. Wikipedia event enters via SSE.
 2. Published to Redpanda.
 3. Bronze stores it retaining full historical detail.
-4. Silver filters noise and builds candidate topics.
-5. Gold drafts the news and manages live story updates.
+4. Silver filters noise and detects articles that several editors are changing at once.
+5. Gold grounds the story on the article and its diffs, drafts it and manages live story updates.
 6. Serving publishes to MongoDB for the web/API.
 7. Grafana displays technical health and product KPIs.
 
@@ -194,11 +200,54 @@ Use the same `-f` flags for every later `docker compose` command (`ps`, `logs`, 
 1. Copy `.env.example` to `.env`.
 2. Keep `SILVER_EVENT_HOLD_MINUTES=5` as a stable baseline.
 3. Adjust only if necessary:
+   * scope (`SILVER_ALLOWED_WIKIS`, e.g. `enwiki,eswiki`)
    * volume (`SILVER_TOPIC_TOP_N`, `GOLD_MAX_EVENTS_PER_BATCH`)
-   * editorial rigor (`SILVER_TOPIC_MIN_DOC_FREQ`, Gold deduplication thresholds)
-   * model (`OLLAMA_MODEL`)
+   * editorial rigor (`SILVER_TOPIC_MIN_EDITORS`, `SILVER_TOPIC_MIN_EDITS`, Gold deduplication thresholds)
+   * model (`OLLAMA_MODEL`): any Ollama model that supports structured outputs works; compare candidates with
+     the Gold quality report before switching.
 
 Note: in `newsroom-api`, the feed prioritizes pieces with valid inference and keeps obvious noise off the front page.
+
+### 5.1 How a Story Is Selected
+
+| Stage | Signal | Setting |
+|-------|--------|---------|
+| Scope | Wiki (`enwiki`…), change `type` (`edit`, `new`) and `namespace` (0 = articles) from the event itself | `SILVER_ALLOWED_WIKIS`, `SILVER_ALLOWED_TYPES`, `SILVER_ALLOWED_NAMESPACES` |
+| Noise | Bots, minor edits, numeric titles, maintenance topics, technical edit summaries | editorial rules in `common/editorial_common.py` |
+| Stability | Edits followed by a revert on the same article within the hold window are dropped | `SILVER_EVENT_HOLD_MINUTES` |
+| Burst | Article edited by at least N **distinct** editors and M edits inside the window | `SILVER_TOPIC_MIN_EDITORS`, `SILVER_TOPIC_MIN_EDITS`, `SILVER_TOPIC_LOOKBACK_MINUTES` |
+| Ranking | `3 × editors + 0.5 × edits (capped) + bytes added (capped) + title quality` | `SILVER_TOPIC_TOP_N` |
+| Facts | Article lead + text added by the largest recent edits, sent to the LLM | `GOLD_WIKI_CONTEXT_ENABLED`, `GOLD_CONTEXT_MAX_DIFFS`, `GOLD_CONTEXT_MAX_CHARS` |
+| Publishing | Headlines/summaries the guardrails had to replace are stored with `inference_ok=false` and stay off the front page | — |
+
+Counting distinct editors instead of edits follows research on breaking-news detection from Wikipedia edit
+spikes (Steiner, van Hooland and Summers, *"MJ no more"*, WWW 2013): one person saving a draft thirty times
+is not news; several people converging on the same article usually is.
+
+### 5.2 Tuning the Selection Offline
+
+The selection can be measured without the stack, replaying recorded events through the same Silver code:
+
+```bash
+# 1. Record a sample of the live stream (standard library only)
+python tools/record_stream.py --minutes 60 --out data/recentchange.jsonl
+
+# 2. Replay it in 5-minute windows and write one row per selected article
+docker compose run --rm selection-lab select --input /opt/data/recentchange.jsonl --out /opt/data/candidates.csv
+
+# 3. Fill the "newsworthy" column (y/n) and measure precision and precision@k
+docker compose run --rm selection-lab score --labels /opt/data/candidates.csv --k 10
+
+# 4. Compare another configuration with the same labels (e.g. the edit-count baseline)
+docker compose run --rm selection-lab select --input /opt/data/recentchange.jsonl --out /opt/data/baseline.csv \
+    --wikis '*' --types '*' --min-editors 1 --min-edits 3
+docker compose run --rm selection-lab score --labels /opt/data/candidates.csv --candidates /opt/data/baseline.csv
+```
+
+`selection-lab` is a Compose service in the `tools` profile (never started by `up`) that uses the same Spark
+image and the same `SILVER_*` settings as the Silver job. With `--bronze` instead of `--input` it replays the
+Bronze table of a running stack. With PySpark and Java installed locally, `python tools/offline_topics.py …`
+works the same.
 
 ---
 
@@ -208,8 +257,8 @@ Note: in `newsroom-api`, the feed prioritizes pieces with valid inference and ke
 
 | Suite | What it covers | Command |
 |-------|----------------|---------|
-| Unit | Editorial rules, Gold LLM handling and deduplication, producer back-pressure, Mongo serving, API endpoints and metrics | `pytest -m "not spark"` |
-| Integration | Real Spark + Delta Lake: Silver curation, and the serving stream surviving Gold's `UPDATE` | `pytest -m spark` (needs Java 17+) |
+| Unit | Editorial rules and change filter, burst scoring, Gold LLM handling (schema, guardrails, grounding), Wikimedia diff parsing, deduplication, producer back-pressure, Mongo serving, API endpoints and metrics, offline tools, Compose/`.env.example` drift | `pytest -m "not spark"` |
+| Integration | Real Spark + Delta Lake: Silver filtering, distinct-editor bursts and revert tainting, the offline replay tool, and the serving stream surviving Gold's `UPDATE` | `pytest -m spark` (needs Java 17+) |
 | Frontend | LLM output is HTML-escaped and only `http(s)` links are rendered | `node --test tests/frontend/*.test.mjs` |
 | Lint | Ruff lint + format, `docker compose` validation | `ruff check . && ruff format --check .` |
 
@@ -298,7 +347,7 @@ The main Grafana dashboard is automatically provisioned and combines technical a
 
 ### 8.2 Known Risks
 
-* In low-signal events (categories/metadata), some news might sound generic.
+* When neither the article lead nor the diffs explain the edits, stories can only report the surge of activity.
 * Occasional multilingual noise in extreme contexts.
 * Real production costs sensitive to egress, retention, and telemetry.
 
@@ -384,6 +433,7 @@ Guiding Scenarios:
 
 * `producer/` SSE ingestion -> Redpanda
 * `spark-jobs/` bronze, silver, gold, and serving
+* `tools/` stream recorder and offline evaluation of the news selection
 * `newsroom-api/` web, API, and metrics
 * `observability/` Prometheus + Grafana provisioning
 * `tests/unit`, `tests/integration`, `tests/frontend` automated test suites
@@ -396,6 +446,11 @@ Guiding Scenarios:
 | Redpanda instead of Apache Kafka | Kafka API with a single binary and no ZooKeeper, ideal for a local stack | Same client code works against managed Kafka (MSK, Confluent) |
 | Medallion layers on Delta Lake + MinIO | ACID appends, replayable history and schema evolution on S3-compatible storage | More storage than a single pipeline, which is what enables reprocessing |
 | Editorial filtering in Silver, not in the prompt | Cheap, deterministic rules (bots, reverts, namespaces) cut LLM calls and hallucination sources | Rules need tuning per wiki language |
+| Structured event fields instead of title heuristics | `wiki`, `type` and `namespace` are exact in every language, while title regexes miss localized namespaces and let categorisation/log events through | Relies on Wikimedia's versioned `recentchange` schema |
+| Distinct editors, not edit count, as the burst signal | Many people converging on one article is news; one person saving many times is not | Small wikis rarely reach the threshold, so it is tuned per scope |
+| Grounding the LLM with the article lead and the diff | Edit summaries rarely state facts; the article and the added text do, so the model reports instead of guessing | Up to `1 + GOLD_CONTEXT_MAX_DIFFS` HTTP calls per story; failures fall back to the ungrounded prompt |
+| Templated answers are stored but not published | Keeps the front page free of filler while the quality report can still count them | Fewer stories when the model struggles |
+| Offline replay with the production code | Thresholds are chosen by precision on labelled samples, and the tool cannot drift from the job | Labelling is manual |
 | Maturation window before publishing | Edits reverted within `SILVER_EVENT_HOLD_MINUTES` never become news | News appears a few minutes after the edit |
 | Lexical similarity (SequenceMatcher + Jaccard) for deduplication | No extra model, explainable scores, fast enough per batch | Paraphrased duplicates can slip through; embeddings would catch them |
 | Recent-topic check before calling the LLM | Silver re-emits hot topics every micro-batch; skipping them first saves GPU time | Updates are limited to one per `GOLD_MIN_UPDATE_INTERVAL_MINUTES` |

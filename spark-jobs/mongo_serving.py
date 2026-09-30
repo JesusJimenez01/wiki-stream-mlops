@@ -70,6 +70,7 @@ def to_document(row_dict: Dict[str, Any]) -> Dict[str, Any]:
         "topic_term": row_dict.get("topic_term"),
         "topic_label": row_dict.get("topic_label"),
         "topic_event_count": int(row_dict.get("topic_event_count") or 0),
+        "topic_editor_count": int(row_dict.get("topic_editor_count") or 0),
         "headline": row_dict.get("headline"),
         "summary": row_dict.get("summary"),
         "tags": row_dict.get("tags") or [],
@@ -89,6 +90,7 @@ def to_document(row_dict: Dict[str, Any]) -> Dict[str, Any]:
         "timestamp": parse_iso_datetime(row_dict.get("gold_ts")),
         "inference_ok": bool(row_dict.get("inference_ok", False)),
         "inference_error": row_dict.get("inference_error"),
+        "grounded": bool(row_dict.get("grounded", False)),
         "dedup_score": float(row_dict.get("dedup_score") or 0.0),
         "duplicate_of_gold_ts": row_dict.get("duplicate_of_gold_ts"),
         "source_raw_json": row_dict.get("source_raw_json"),
@@ -247,13 +249,17 @@ def main() -> None:
     wait_for_delta_source(spark, GOLD_PATH, "Gold")
 
     gold_stream_df = read_gold_stream(spark)
-    if "topic_label" not in gold_stream_df.columns:
-        gold_stream_df = gold_stream_df.withColumn("topic_label", lit(None).cast("string"))
+    # Columns added to Gold over time; older tables simply lack them
+    optional_columns = (("topic_label", "string"), ("topic_editor_count", "long"), ("grounded", "boolean"))
+    for column_name, column_type in optional_columns:
+        if column_name not in gold_stream_df.columns:
+            gold_stream_df = gold_stream_df.withColumn(column_name, lit(None).cast(column_type))
 
     selected_df = gold_stream_df.select(
         "topic_term",
         "topic_label",
         "topic_event_count",
+        "topic_editor_count",
         "event_id",
         "event_meta_id",
         "domain",
@@ -269,6 +275,7 @@ def main() -> None:
         "tags",
         "inference_ok",
         "inference_error",
+        "grounded",
         "dedup_score",
         "is_update",
         "duplicate_of_gold_ts",

@@ -39,52 +39,87 @@ class TestModelOutput:
             {"topic_label": "Space", "headline": "Crew named", "summary": "", "tags": "NASA, Moon"}
         )
         assert (label, headline, tags) == ("Space", "Crew named", ["NASA", "Moon"])
-        assert summary  # empty summaries get a neutral fallback
+        assert summary == ""  # left empty so the guardrails can flag it
 
 
 class TestHumanFraming:
+    def test_clean_model_output_passes_untouched(self):
+        *fields, issues = gold.enforce_human_framing(
+            "Artemis II", SAMPLES, "Space", "Artemis II crew named", "NASA confirmed the crew.", ["NASA"]
+        )
+        assert fields == ["Space", "Artemis II crew named", "NASA confirmed the crew.", ["NASA"]]
+        assert issues == []
+
     def test_abstract_headline_is_rewritten_around_the_protagonist(self):
-        _, headline, _, _ = gold.enforce_human_framing(
+        _, headline, _, _, issues = gold.enforce_human_framing(
             "Artemis II", SAMPLES, "Space", "Update on several articles", "Crew confirmed for the flyby.", ["NASA"]
         )
         assert headline.startswith("Artemis II")
+        assert issues == ["headline: abstract opening"]
 
     def test_foreign_script_and_robotic_summaries_are_replaced(self):
-        label, _, summary, tags = gold.enforce_human_framing(
+        label, _, summary, tags, issues = gold.enforce_human_framing(
             "Artemis II", SAMPLES, "Москва", "Artemis II crew named", "Москва новости", []
         )
         assert label == "News"
         assert "Artemis II" in summary
         assert tags == ["news"]
+        # Label and tags are cosmetic; only headline/summary replacements are issues
+        assert issues == ["summary: non-Latin script"]
+
+    def test_empty_summary_is_reported(self):
+        *_, issues = gold.enforce_human_framing("Artemis II", SAMPLES, "Space", "Artemis II crew named", "", [])
+        assert issues == ["summary: empty"]
 
     def test_namespace_titles_are_not_used_as_protagonist(self):
         samples = [{"title": "Category:Spaceflight"}, {"title": "Artemis II"}]
         assert gold.pick_story_anchor("space", samples) == "Artemis II"
 
 
+def _ollama_returning(monkeypatch, story):
+    response = MagicMock()
+    response.read.return_value = json.dumps({"response": json.dumps(story)}).encode()
+    opener = MagicMock()
+    opener.return_value.__enter__.return_value = response
+    monkeypatch.setattr(gold, "urlopen", opener)
+    return opener
+
+
+STORY = {
+    "topic_label": "Space",
+    "headline": "Artemis II crew named",
+    "summary": "NASA confirmed the crew.",
+    "tags": ["NASA", "Moon"],
+}
+
+
 class TestCallOllama:
     def test_success_returns_structured_story(self, monkeypatch):
-        body = {
-            "response": json.dumps(
-                {
-                    "topic_label": "Space",
-                    "headline": "Artemis II crew named",
-                    "summary": "NASA confirmed the crew.",
-                    "tags": ["NASA", "Moon"],
-                }
-            )
-        }
-        response = MagicMock()
-        response.read.return_value = json.dumps(body).encode()
-        opener = MagicMock()
-        opener.return_value.__enter__.return_value = response
-        monkeypatch.setattr(gold, "urlopen", opener)
+        _ollama_returning(monkeypatch, STORY)
 
         label, headline, summary, tags, ok, error = gold.call_ollama("prompt", "Artemis II", SAMPLES)
 
         assert ok is True and error is None
         assert headline == "Artemis II crew named"
         assert tags == ["NASA", "Moon"]
+
+    def test_request_constrains_the_output_with_a_json_schema(self, monkeypatch):
+        opener = _ollama_returning(monkeypatch, STORY)
+
+        gold.call_ollama("prompt", "Artemis II", SAMPLES)
+
+        payload = json.loads(opener.call_args.args[0].data)
+        assert payload["format"] == gold.NEWS_JSON_SCHEMA
+        assert set(payload["format"]["required"]) == {"topic_label", "headline", "summary", "tags"}
+
+    def test_templated_story_is_not_published_as_a_success(self, monkeypatch):
+        _ollama_returning(monkeypatch, {**STORY, "headline": "Update on several articles"})
+
+        _, headline, _, _, ok, error = gold.call_ollama("prompt", "Artemis II", SAMPLES)
+
+        assert ok is False
+        assert error == "Rejected by editorial guardrails: headline: abstract opening"
+        assert headline.startswith("Artemis II")  # still stored for the quality report
 
     @pytest.mark.parametrize("body", [b"null", b"[1, 2]", b'"just a string"'])
     def test_non_object_http_body_produces_a_fallback(self, monkeypatch, body):
@@ -187,5 +222,20 @@ def test_prompt_contains_samples_and_disables_qwen_thinking():
     prompt = gold.build_topic_prompt("Artemis II", 12, SAMPLES)
     assert "Recurring topic: Artemis II" in prompt
     assert "title: Artemis II | comment: crew update" in prompt
+    assert "Distinct editors" not in prompt
+    assert "FACT RULES" not in prompt  # nothing to ground on
     if gold.OLLAMA_MODEL.lower().startswith("qwen3"):
         assert prompt.startswith("/no_think")
+
+
+def test_prompt_is_grounded_on_the_article_and_the_added_text():
+    samples = [{**SAMPLES[0], "byte_delta": 812}]
+    context = {"article": "Artemis II is a crewed lunar flyby.", "added": ["The crew was announced on 3 April."]}
+
+    prompt = gold.build_topic_prompt("Artemis II", 12, samples, context=context, editor_count=5)
+
+    assert "Distinct editors: 5" in prompt
+    assert "size change: +812 bytes" in prompt
+    assert "Artemis II is a crewed lunar flyby." in prompt
+    assert "- The crew was announced on 3 April." in prompt
+    assert "FACT RULES" in prompt

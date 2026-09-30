@@ -1,41 +1,50 @@
-"""Silver Processing — Wikipedia Pipeline (Phase 3)"""
+"""Silver Processing — Wikipedia Pipeline (Phase 3)
+
+Cleans Bronze events and selects the article bursts that deserve a news story.
+
+Selection uses the structured fields of the Wikimedia ``recentchange`` event
+(``wiki``, ``type``, ``namespace``, ``length``, ``revision``) and ranks articles by
+how many *different* people are editing them inside the lookback window: a
+sudden crowd of editors on one article is the classic breaking-news signal.
+"""
 
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql.functions import (
     coalesce,
     col,
-    concat_ws,
     count,
+    countDistinct,
     current_timestamp,
     desc,
-    explode,
     expr,
     first,
     from_json,
     from_unixtime,
-    length,
+    greatest,
     lit,
     lower,
     regexp_extract,
-    regexp_replace,
-    split,
     to_timestamp,
     trim,
     when,
 )
+from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType, StructField, StructType
 
 from common.editorial_common import (
+    ChangeFilter,
+    burst_score,
     looks_like_generic_topic,
     looks_like_low_signal_topic,
+    rank_bursts,
     sanitize_topic_label,
-    topic_rank_score,
 )
 from common.editorial_spark import with_editorial_signals
 from common.spark_common import MINIO_BUCKET, create_spark_session, wait_for_delta_source
@@ -50,31 +59,56 @@ SILVER_CHECKPOINT_PATH = f"s3a://{MINIO_BUCKET}/silver/_checkpoint"
 SILVER_METRICS_PATH = f"s3a://{MINIO_BUCKET}/silver/_metrics"
 
 TRIGGER_INTERVAL = os.getenv("SILVER_TRIGGER_INTERVAL", "30 seconds")
-REVERT_SIGNAL_REGEX = os.getenv(
-    "SILVER_REVERT_SIGNAL_REGEX",
-    r".*\b(undid revision|revert(?:ed|ing)? .*edit(?:s)? by)\b.*",
-).strip()
-EVENT_HOLD_MINUTES = int(os.getenv("SILVER_EVENT_HOLD_MINUTES", "5"))
-TOPIC_LOOKBACK_MINUTES = int(os.getenv("SILVER_TOPIC_LOOKBACK_MINUTES", "30"))
-TOPIC_TOP_N = int(os.getenv("SILVER_TOPIC_TOP_N", "5"))
-TOPIC_MIN_DOC_FREQ = int(os.getenv("SILVER_TOPIC_MIN_DOC_FREQ", "8"))
-TOPIC_SAMPLE_SIZE = int(os.getenv("SILVER_TOPIC_SAMPLE_SIZE", "12"))
-TOKEN_MIN_LEN = int(os.getenv("SILVER_TOKEN_MIN_LEN", "4"))
-TITLE_TOPIC_MIN_DOC_FREQ = max(3, min(TOPIC_MIN_DOC_FREQ, 5))
-TOPIC_CANDIDATE_POOL_SIZE = max(TOPIC_TOP_N * 3, 12)
-NOISE_TOKEN_REGEX = r"^(q\d+|p\d+|special|create|property|batch|short|removed|toollabs|wbeditentity)$"
-STOPWORDS = {
-    word.strip().lower()
-    for word in os.getenv(
-        "SILVER_TOPIC_STOPWORDS",
-        "wikipedia,wikidata,wikimedia,commons,article,file,edit,updated,update,category,page,using,added,user,minor,bot,with,from,that,this,para,como,donde,sobre,con,from,the,and,for,are,was,you,your,http,https,www,wiki,batch,short,removed,quickstatements,wbeditentity,toollabs,property,create",
-    ).split(",")
-    if word.strip()
-}
+DEFAULT_REVERT_SIGNAL_REGEX = r".*\b(undid revision|revert(?:ed|ing)? .*edit(?:s)? by)\b.*"
+
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    """Every knob of the news selection, so jobs, tests and offline tools share one definition."""
+
+    change_filter: ChangeFilter = field(default_factory=ChangeFilter)
+    revert_regex: str = DEFAULT_REVERT_SIGNAL_REGEX
+    hold_minutes: int = 5
+    lookback_minutes: int = 30
+    top_n: int = 5
+    min_edits: int = 5
+    min_editors: int = 3
+    sample_size: int = 12
+
+    @property
+    def candidate_pool_size(self) -> int:
+        return max(self.top_n * 3, 12)
+
+    @classmethod
+    def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "SelectionConfig":
+        env = os.environ if env is None else env
+        return cls(
+            change_filter=ChangeFilter.from_settings(
+                wikis=env.get("SILVER_ALLOWED_WIKIS", "enwiki"),
+                types=env.get("SILVER_ALLOWED_TYPES", "edit,new"),
+                namespaces=env.get("SILVER_ALLOWED_NAMESPACES", "0"),
+            ),
+            revert_regex=env.get("SILVER_REVERT_SIGNAL_REGEX", DEFAULT_REVERT_SIGNAL_REGEX).strip(),
+            hold_minutes=int(env.get("SILVER_EVENT_HOLD_MINUTES", "5")),
+            lookback_minutes=int(env.get("SILVER_TOPIC_LOOKBACK_MINUTES", "30")),
+            top_n=int(env.get("SILVER_TOPIC_TOP_N", "5")),
+            min_edits=int(env.get("SILVER_TOPIC_MIN_EDITS", "5")),
+            min_editors=int(env.get("SILVER_TOPIC_MIN_EDITORS", "3")),
+            sample_size=int(env.get("SILVER_TOPIC_SAMPLE_SIZE", "12")),
+        )
+
+
+SELECTION = SelectionConfig.from_env()
+
+_REVISION_PAIR = StructType([StructField("old", LongType(), True), StructField("new", LongType(), True)])
 
 WIKI_CHANGE_SCHEMA = StructType(
     [
         StructField("id", LongType(), True),
+        StructField("type", StringType(), True),
+        StructField("namespace", LongType(), True),
+        StructField("wiki", StringType(), True),
+        StructField("server_name", StringType(), True),
         StructField("title", StringType(), True),
         StructField("comment", StringType(), True),
         StructField("user", StringType(), True),
@@ -82,6 +116,8 @@ WIKI_CHANGE_SCHEMA = StructType(
         StructField("minor", BooleanType(), True),
         StructField("timestamp", LongType(), True),
         StructField("title_url", StringType(), True),
+        StructField("length", _REVISION_PAIR, True),
+        StructField("revision", _REVISION_PAIR, True),
         StructField(
             "meta",
             StructType(
@@ -104,8 +140,13 @@ TOPIC_SCHEMA = StructType(
         StructField("topic_mode", StringType(), False),
         StructField("topic_label", StringType(), False),
         StructField("topic_event_count", LongType(), False),
+        StructField("topic_editor_count", LongType(), False),
+        StructField("topic_bytes_added", LongType(), False),
+        StructField("topic_score", DoubleType(), False),
         StructField("event_id", LongType(), True),
         StructField("event_meta_id", StringType(), True),
+        StructField("wiki", StringType(), True),
+        StructField("server_name", StringType(), True),
         StructField("domain", StringType(), True),
         StructField("article_uri", StringType(), True),
         StructField("title", StringType(), True),
@@ -121,11 +162,27 @@ TOPIC_SCHEMA = StructType(
 )
 
 
-def transform_to_silver(bronze_batch_df: DataFrame) -> DataFrame:
+def change_filter_condition(change_filter: ChangeFilter) -> Column:
+    """Spark twin of ``ChangeFilter.accepts``: no bots, no minor edits, allowed wiki/type/namespace."""
+    condition = (~coalesce(col("bot"), lit(False))) & (~coalesce(col("minor"), lit(False)))
+    if change_filter.wikis:
+        condition = condition & col("wiki").isin(sorted(change_filter.wikis))
+    if change_filter.types:
+        condition = condition & col("change_type").isin(sorted(change_filter.types))
+    if change_filter.namespaces:
+        condition = condition & col("namespace").isin(sorted(change_filter.namespaces))
+    return condition
+
+
+def transform_to_silver(bronze_batch_df: DataFrame, config: SelectionConfig = SELECTION) -> DataFrame:
     parsed_df = bronze_batch_df.withColumn("event", from_json(col("raw_json"), WIKI_CHANGE_SCHEMA))
     selected_df = parsed_df.select(
         col("event.id").alias("event_id"),
         col("event.meta.id").alias("event_meta_id"),
+        col("event.type").alias("change_type"),
+        col("event.namespace").alias("namespace"),
+        col("event.wiki").alias("wiki"),
+        col("event.server_name").alias("server_name"),
         col("event.meta.domain").alias("domain"),
         col("event.meta.uri").alias("article_uri"),
         col("event.title").alias("title"),
@@ -135,11 +192,15 @@ def transform_to_silver(bronze_batch_df: DataFrame) -> DataFrame:
         col("event.minor").alias("minor"),
         col("event.timestamp").alias("event_unix_ts"),
         col("event.title_url").alias("title_url"),
+        col("event.revision.old").alias("rev_old"),
+        col("event.revision.new").alias("rev_new"),
+        (coalesce(col("event.length.new"), lit(0)) - coalesce(col("event.length.old"), lit(0))).alias("byte_delta"),
         col("raw_json"),
         col("kafka_timestamp"),
         col("ingestion_ts"),
-    ).filter((~coalesce(col("bot"), lit(False))) & (~coalesce(col("minor"), lit(False))))
+    ).filter(change_filter_condition(config.change_filter))
 
+    revert_regex = config.revert_regex
     normalized_df = (
         selected_df.withColumn("title", trim(col("title")))
         .withColumn("comment", trim(col("comment")))
@@ -149,18 +210,16 @@ def transform_to_silver(bronze_batch_df: DataFrame) -> DataFrame:
         .withColumn(
             "revert_signal_term",
             lit("")
-            if not REVERT_SIGNAL_REGEX
-            else regexp_extract(coalesce(col("comment_normalized"), lit("")), REVERT_SIGNAL_REGEX, 1),
+            if not revert_regex
+            else regexp_extract(coalesce(col("comment_normalized"), lit("")), revert_regex, 1),
         )
-        .withColumn(
-            "is_revert_signal", lit(False) if not REVERT_SIGNAL_REGEX else (col("revert_signal_term") != lit(""))
-        )
+        .withColumn("is_revert_signal", lit(False) if not revert_regex else (col("revert_signal_term") != lit("")))
         .withColumn("silver_ts", current_timestamp())
     )
-    return analyze_quality(with_editorial_signals(normalized_df))
+    return analyze_quality(with_editorial_signals(normalized_df), config)
 
 
-def analyze_quality(df: DataFrame) -> DataFrame:
+def analyze_quality(df: DataFrame, config: SelectionConfig = SELECTION) -> DataFrame:
     return (
         df.withColumn(
             "moderation_status",
@@ -191,38 +250,34 @@ def analyze_quality(df: DataFrame) -> DataFrame:
         )
         .withColumn(
             "candidate_ready_ts",
-            expr(f"event_ts + INTERVAL {EVENT_HOLD_MINUTES} MINUTES"),
-        )
-        .withColumn(
-            "topic_text",
-            lower(concat_ws(" ", coalesce(col("title"), lit("")), coalesce(col("comment"), lit("")))),
+            expr(f"event_ts + INTERVAL {int(config.hold_minutes)} MINUTES"),
         )
     )
 
 
-def load_publishable_events(spark: SparkSession, now_utc: datetime) -> Tuple[DataFrame, int]:
-    lookback_minutes = max(TOPIC_LOOKBACK_MINUTES, EVENT_HOLD_MINUTES)
+def publishable_events(
+    silver_df: DataFrame, now_utc: datetime, config: SelectionConfig = SELECTION
+) -> Tuple[DataFrame, int]:
+    """
+    Events that matured for ``hold_minutes`` inside the lookback window and were not
+    reverted meanwhile. Returns the events and how many were dropped as reverted.
+    """
+    lookback_minutes = max(config.lookback_minutes, config.hold_minutes)
     lookback_start_iso = (now_utc - timedelta(minutes=lookback_minutes)).isoformat()
-    silver_df = spark.read.format("delta").load(SILVER_OUTPUT_PATH)
-
-    publishable_df = (
-        silver_df.filter(col("event_ts").isNotNull())
-        .filter(col("event_ts") >= lit(lookback_start_iso).cast("timestamp"))
-        .filter(coalesce(col("is_publishable_candidate"), lit(False)))
-        .filter(col("candidate_ready_ts") <= lit(now_utc.isoformat()).cast("timestamp"))
+    windowed_df = silver_df.filter(col("event_ts").isNotNull()).filter(
+        col("event_ts") >= lit(lookback_start_iso).cast("timestamp")
     )
-    revert_signals_df = (
-        silver_df.filter(col("event_ts").isNotNull())
-        .filter(col("event_ts") >= lit(lookback_start_iso).cast("timestamp"))
-        .filter(coalesce(col("is_revert_signal"), lit(False)))
-        .select(
-            col("domain").alias("revert_domain"),
-            col("title_normalized").alias("revert_title_normalized"),
-            col("event_ts").alias("revert_event_ts"),
-        )
+
+    candidates_df = windowed_df.filter(coalesce(col("is_publishable_candidate"), lit(False))).filter(
+        col("candidate_ready_ts") <= lit(now_utc.isoformat()).cast("timestamp")
+    )
+    revert_signals_df = windowed_df.filter(coalesce(col("is_revert_signal"), lit(False))).select(
+        col("domain").alias("revert_domain"),
+        col("title_normalized").alias("revert_title_normalized"),
+        col("event_ts").alias("revert_event_ts"),
     )
     tainted_event_ids_df = (
-        publishable_df.alias("candidate")
+        candidates_df.alias("candidate")
         .join(
             revert_signals_df.alias("revert"),
             on=(col("candidate.domain") == col("revert.revert_domain"))
@@ -235,23 +290,37 @@ def load_publishable_events(spark: SparkSession, now_utc: datetime) -> Tuple[Dat
         .distinct()
     )
     tainted_count = tainted_event_ids_df.count()
-    return publishable_df.join(tainted_event_ids_df, on="event_id", how="left_anti"), tainted_count
+    return candidates_df.join(tainted_event_ids_df, on="event_id", how="left_anti"), tainted_count
 
 
-def detect_hot_topic_terms(df: DataFrame) -> List[Dict[str, Any]]:
-    title_candidates = (
+def load_publishable_events(
+    spark: SparkSession, now_utc: datetime, config: SelectionConfig = SELECTION
+) -> Tuple[DataFrame, int]:
+    return publishable_events(spark.read.format("delta").load(SILVER_OUTPUT_PATH), now_utc, config)
+
+
+def detect_hot_topic_terms(df: DataFrame, config: SelectionConfig = SELECTION) -> List[Dict[str, Any]]:
+    """
+    Articles edited by at least ``min_editors`` different people (and ``min_edits``
+    edits) in the window, ranked by ``burst_score``.
+    """
+    bursts = (
         df.filter(coalesce(col("is_editorial_topic_candidate"), lit(False)))
         .groupBy("editorial_topic_key")
-        .agg(first("editorial_topic_label", ignorenulls=True).alias("topic_label"), count("event_id").alias("count"))
-        .filter(col("count") >= TITLE_TOPIC_MIN_DOC_FREQ)
-        .orderBy(desc("count"), desc(length(col("topic_label"))))
-        .limit(TOPIC_CANDIDATE_POOL_SIZE)
+        .agg(
+            first("editorial_topic_label", ignorenulls=True).alias("topic_label"),
+            count("event_id").alias("edits"),
+            countDistinct("editor_user").alias("editors"),
+            spark_sum(greatest(coalesce(col("byte_delta"), lit(0)), lit(0))).alias("bytes_added"),
+        )
+        .filter((col("edits") >= config.min_edits) & (col("editors") >= config.min_editors))
+        .orderBy(desc("editors"), desc("edits"), col("editorial_topic_key"))
+        .limit(config.candidate_pool_size)
         .collect()
     )
 
-    selected_topics: List[Dict[str, Any]] = []
-    selected_keys = set()
-    for row in title_candidates:
+    topics: List[Dict[str, Any]] = []
+    for row in bursts:
         topic_key = row["editorial_topic_key"]
         topic_label = (row["topic_label"] or "").strip()
         if (
@@ -261,117 +330,70 @@ def detect_hot_topic_terms(df: DataFrame) -> List[Dict[str, Any]]:
             or looks_like_low_signal_topic(topic_label)
         ):
             continue
-        selected_topics.append(
+        edits, editors, bytes_added = int(row["edits"]), int(row["editors"]), int(row["bytes_added"] or 0)
+        topics.append(
             {
                 "label": topic_label,
-                "count": int(row["count"]),
-                "mode": "title_exact",
                 "key": topic_key,
-                "score": topic_rank_score(topic_label, int(row["count"]), "title_exact"),
+                "mode": "article_burst",
+                "count": edits,
+                "editors": editors,
+                "bytes_added": bytes_added,
+                "score": burst_score(topic_label, editors, edits, bytes_added),
             }
         )
-        selected_keys.add(topic_key)
-
-    selected_topics = sorted(
-        selected_topics, key=lambda item: (item["score"], item["count"], len(item["label"])), reverse=True
-    )
-    if len(selected_topics) >= TOPIC_TOP_N:
-        return selected_topics[:TOPIC_TOP_N]
-
-    remaining_slots = max(TOPIC_CANDIDATE_POOL_SIZE - len(selected_topics), 0)
-
-    top_terms = (
-        df.filter(coalesce(col("editorial_priority"), lit(0)) >= 0)
-        .select(
-            col("event_id"),
-            explode(
-                split(regexp_replace(col("topic_text"), r"[^a-zA-Z0-9áéíóúüñçàèìòùâêîôûãõäëïöÿ\s]", " "), r"\s+")
-            ).alias("token"),
-        )
-        .filter(col("token") != "")
-        .filter(~col("token").rlike(r"^[0-9]+$"))
-        .filter(~col("token").rlike(NOISE_TOKEN_REGEX))
-        .filter(length(col("token")) >= TOKEN_MIN_LEN)
-        .filter(~col("token").isin(list(STOPWORDS)))
-        .dropDuplicates(["event_id", "token"])
-        .groupBy("token")
-        .count()
-        .filter(col("count") >= TOPIC_MIN_DOC_FREQ)
-        .orderBy(desc("count"), col("token"))
-        .limit(max(remaining_slots, TOPIC_CANDIDATE_POOL_SIZE))
-        .collect()
-    )
-
-    for row in top_terms:
-        token = row["token"]
-        if token in selected_keys or looks_like_low_signal_topic(token):
-            continue
-        selected_topics.append(
-            {
-                "label": token,
-                "count": int(row["count"]),
-                "mode": "token_contains",
-                "key": token,
-                "score": topic_rank_score(token, int(row["count"]), "token_contains"),
-            }
-        )
-
-    ranked_topics = sorted(
-        selected_topics,
-        key=lambda item: (item["score"], item["count"], item["mode"] == "title_exact", len(item["label"])),
-        reverse=True,
-    )
-    return ranked_topics[:TOPIC_TOP_N]
+    return rank_bursts(topics)[: config.top_n]
 
 
-def build_topic_candidates(spark: SparkSession, now_utc: datetime) -> Tuple[List[Dict[str, Any]], int, int]:
-    publishable_df, tainted_count = load_publishable_events(spark, now_utc)
-    publishable_count = publishable_df.count()
-    if publishable_count == 0:
-        return [], 0, tainted_count
+SAMPLE_COLUMNS = (
+    "event_id",
+    "event_meta_id",
+    "wiki",
+    "server_name",
+    "domain",
+    "article_uri",
+    "title",
+    "comment",
+    "editor_user",
+    "title_url",
+    "rev_old",
+    "rev_new",
+    "byte_delta",
+    "event_ts",
+    "silver_ts",
+    "raw_json",
+)
 
-    hot_terms = detect_hot_topic_terms(publishable_df)
-    if not hot_terms:
-        return [], publishable_count, tainted_count
 
+def _optional_int(value: Any) -> Optional[int]:
+    return int(value) if value is not None else None
+
+
+def build_topic_records(
+    publishable_df: DataFrame, now_utc: datetime, config: SelectionConfig = SELECTION
+) -> List[Dict[str, Any]]:
     topic_records: List[Dict[str, Any]] = []
-    covered_event_ids = set()
-    for topic in hot_terms:
-        topic_events_df = (
-            (
-                publishable_df.filter(col("editorial_topic_key") == lit(topic["key"]))
-                if topic["mode"] == "title_exact"
-                else publishable_df.filter(col("topic_text").contains(topic["label"]))
-            )
+    for topic in detect_hot_topic_terms(publishable_df, config):
+        sample_rows = (
+            publishable_df.filter(col("editorial_topic_key") == lit(topic["key"]))
             .orderBy(col("event_ts").desc())
-            .limit(TOPIC_SAMPLE_SIZE)
+            .limit(config.sample_size)
+            .select(*SAMPLE_COLUMNS)
+            .collect()
         )
-
-        sample_rows = topic_events_df.select(
-            "event_id",
-            "event_meta_id",
-            "domain",
-            "article_uri",
-            "title",
-            "comment",
-            "editor_user",
-            "title_url",
-            "event_ts",
-            "silver_ts",
-            "raw_json",
-        ).collect()
         if not sample_rows:
             continue
 
-        sample_event_ids = {int(row["event_id"]) for row in sample_rows if row["event_id"] is not None}
-        overlap_ratio = (
-            len(sample_event_ids.intersection(covered_event_ids)) / len(sample_event_ids) if sample_event_ids else 0.0
-        )
-        if overlap_ratio >= 0.7:
-            continue
-
         samples = [
-            {"title": row["title"] or "", "comment": row["comment"] or "", "domain": row["domain"] or ""}
+            {
+                "title": row["title"] or "",
+                "comment": row["comment"] or "",
+                "domain": row["domain"] or "",
+                "server_name": row["server_name"] or row["domain"] or "",
+                "rev_old": _optional_int(row["rev_old"]),
+                "rev_new": _optional_int(row["rev_new"]),
+                "byte_delta": int(row["byte_delta"] or 0),
+            }
             for row in sample_rows
         ]
         representative = sample_rows[0]
@@ -390,8 +412,13 @@ def build_topic_candidates(spark: SparkSession, now_utc: datetime) -> Tuple[List
                 "topic_mode": topic["mode"],
                 "topic_label": topic_label,
                 "topic_event_count": max(int(topic["count"]) - generic_topic_penalty, 1),
+                "topic_editor_count": int(topic["editors"]),
+                "topic_bytes_added": int(topic["bytes_added"]),
+                "topic_score": float(topic["score"]),
                 "event_id": representative["event_id"],
                 "event_meta_id": representative["event_meta_id"],
+                "wiki": representative["wiki"],
+                "server_name": representative["server_name"],
                 "domain": representative["domain"],
                 "article_uri": representative["article_uri"],
                 "title": representative["title"],
@@ -405,9 +432,17 @@ def build_topic_candidates(spark: SparkSession, now_utc: datetime) -> Tuple[List
                 "source_raw_json": representative["raw_json"],
             }
         )
-        covered_event_ids.update(sample_event_ids)
+    return topic_records
 
-    return topic_records, publishable_count, tainted_count
+
+def build_topic_candidates(
+    spark: SparkSession, now_utc: datetime, config: SelectionConfig = SELECTION
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    publishable_df, tainted_count = load_publishable_events(spark, now_utc, config)
+    publishable_count = publishable_df.count()
+    if publishable_count == 0:
+        return [], 0, tainted_count
+    return build_topic_records(publishable_df, now_utc, config), publishable_count, tainted_count
 
 
 def write_batch_metrics(
@@ -507,6 +542,7 @@ def main() -> None:
         SILVER_METRICS_PATH,
         TRIGGER_INTERVAL,
     )
+    logger.info("Selection config: %s", SELECTION)
     query.awaitTermination()
 
 

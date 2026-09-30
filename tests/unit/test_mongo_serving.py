@@ -95,3 +95,11 @@ def test_upserts_are_idempotent_and_indexes_created_once(monkeypatch):
     assert [op._filter for op in operations] == [{"_id": "a:1"}, {"_id": "b:2"}]
     assert all(op._upsert for op in operations)
     assert collection.create_index.call_count == 5  # only on the first write
+
+
+def test_selection_and_grounding_fields_reach_mongo_with_safe_defaults():
+    legacy = serving.to_document(_gold_row("old"))
+    current = serving.to_document(_gold_row("new", topic_editor_count=4, grounded=True))
+
+    assert (legacy["topic_editor_count"], legacy["grounded"]) == (0, False)
+    assert (current["topic_editor_count"], current["grounded"]) == (4, True)

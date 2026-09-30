@@ -26,3 +26,6 @@ env/
 build/
 dist/
 *.egg-info/
+
+# Recorded stream samples and evaluation CSVs (tools/)
+/data/

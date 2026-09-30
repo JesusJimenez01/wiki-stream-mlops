@@ -331,6 +331,8 @@ def _serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
         "topic_term": doc.get("topic_term"),
         "topic_label": doc.get("topic_label") or doc.get("topic_term") or "General",
         "topic_event_count": int(doc.get("topic_event_count") or 0),
+        "topic_editor_count": int(doc.get("topic_editor_count") or 0),
+        "grounded": bool(doc.get("grounded", False)),
         "headline": doc.get("headline") or "No headline",
         "summary": doc.get("summary") or "",
         "tags": doc.get("tags") or [],

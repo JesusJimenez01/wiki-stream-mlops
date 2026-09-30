@@ -3,16 +3,20 @@
 import pytest
 
 from common.editorial_common import (
+    ChangeFilter,
+    burst_score,
     contains_foreign_script,
     informative_tags,
     is_namespace_like,
+    label_quality_bonus,
     looks_like_generic_topic,
     looks_like_low_signal_topic,
+    parse_csv_setting,
+    rank_bursts,
     resolve_display_topic_label,
     resolve_source_label,
     sanitize_topic_label,
     source_label_from_domain,
-    topic_rank_score,
 )
 
 
@@ -64,16 +68,84 @@ def test_generic_topics_are_detected_case_insensitively():
     assert not looks_like_generic_topic("History of Rome")
 
 
-def test_topic_rank_prefers_specific_exact_titles():
-    specific = topic_rank_score("2026 FIFA World Cup", 10, "title_exact")
-    token = topic_rank_score("football", 10, "token_contains")
-    generic = topic_rank_score("history", 10, "title_exact")
-    noise = topic_rank_score("Category:Sports", 10, "title_exact")
+def test_label_quality_prefers_specific_titles():
+    specific = label_quality_bonus("2026 FIFA World Cup")
+    generic = label_quality_bonus("history")
 
-    assert specific > token
-    assert specific > generic
+    assert specific > label_quality_bonus("football") > generic
     # A namespace prefix sinks an otherwise identical topic
-    assert noise < topic_rank_score("Sports", 10, "title_exact")
+    assert label_quality_bonus("Category:Sports") < label_quality_bonus("Sports")
+
+
+def test_burst_score_rewards_many_editors_over_many_saves():
+    crowd = burst_score("Hurricane Milton", editors=6, edits=8)
+    one_person_saving = burst_score("Hurricane Milton", editors=1, edits=30)
+
+    assert crowd > one_person_saving
+
+
+def test_burst_score_bounds_volume_and_size_bonuses():
+    base = burst_score("Artemis II", editors=3, edits=30, bytes_added=6000)
+
+    assert burst_score("Artemis II", editors=3, edits=500, bytes_added=10**7) == base
+    assert burst_score("Artemis II", editors=3, edits=30, bytes_added=-5000) < base
+
+
+def test_rank_bursts_breaks_ties_by_editors_then_edits():
+    topics = [
+        {"label": "A", "score": 10.0, "editors": 3, "count": 9},
+        {"label": "B", "score": 10.0, "editors": 4, "count": 5},
+        {"label": "C", "score": 12.0, "editors": 3, "count": 5},
+    ]
+
+    assert [topic["label"] for topic in rank_bursts(topics)] == ["C", "B", "A"]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("enwiki, eswiki", {"enwiki", "eswiki"}),
+        ("", set()),
+        (None, set()),
+        ("*", set()),
+        ("enwiki,*", set()),
+    ],
+)
+def test_parse_csv_setting(value, expected):
+    assert parse_csv_setting(value) == expected
+
+
+def _change(**overrides):
+    change = {"wiki": "enwiki", "type": "edit", "namespace": 0, "bot": False, "minor": False}
+    change.update(overrides)
+    return change
+
+
+@pytest.mark.parametrize(
+    "overrides, accepted",
+    [
+        ({}, True),
+        ({"type": "new"}, True),
+        ({"bot": True}, False),
+        ({"minor": True}, False),
+        ({"wiki": "wikidatawiki"}, False),
+        ({"type": "categorize"}, False),
+        ({"type": "log", "namespace": -1}, False),
+        ({"namespace": 14}, False),  # Category:
+        ({"namespace": None}, False),
+    ],
+)
+def test_default_change_filter_keeps_human_article_edits_on_english_wikipedia(overrides, accepted):
+    assert ChangeFilter().accepts(_change(**overrides)) is accepted
+
+
+def test_change_filter_from_settings_with_wildcards():
+    change_filter = ChangeFilter.from_settings(wikis="enwiki,eswiki", types="*", namespaces="0, 118")
+
+    assert change_filter.namespaces == {0, 118}
+    assert change_filter.accepts(_change(wiki="eswiki", type="log", namespace=118))
+    assert not change_filter.accepts(_change(wiki="dewiki"))
+    assert ChangeFilter.from_settings("*", "*", "*").accepts(_change(wiki="wikidatawiki", namespace=120))
 
 
 def test_source_labels():

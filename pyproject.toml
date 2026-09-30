@@ -9,7 +9,16 @@ target-version = "py310"
 select = ["E", "F", "I", "W", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["common", "app", "producer", "gold_enrichment", "silver_processing", "mongo_serving"]
+known-first-party = [
+    "common",
+    "app",
+    "producer",
+    "gold_enrichment",
+    "silver_processing",
+    "mongo_serving",
+    "offline_topics",
+    "record_stream",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]

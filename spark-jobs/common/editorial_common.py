@@ -1,7 +1,8 @@
 """Pure-Python editorial rules shared by the Spark jobs and the newsroom API."""
 
 import re
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 KNOWN_NAMESPACE_PREFIXES = (
     "category",
@@ -179,17 +180,85 @@ def looks_like_generic_topic(text: Any) -> bool:
     return normalized in GENERIC_TOPIC_TERMS
 
 
-def topic_rank_score(label: Any, count: int, mode: str = "title_exact") -> float:
+# ---------------------------------------------------------------------------
+# Structured selection of recent changes
+# ---------------------------------------------------------------------------
+
+
+def parse_csv_setting(value: Optional[str]) -> FrozenSet[str]:
+    """
+    Parse a comma-separated setting. An empty value or "*" means "no restriction"
+    and is returned as an empty set.
+    """
+    items = {item.strip() for item in (value or "").split(",") if item.strip()}
+    return frozenset() if "*" in items else frozenset(items)
+
+
+@dataclass(frozen=True)
+class ChangeFilter:
+    """
+    Which Wikimedia recent-change events are eligible to become news.
+
+    Uses the structured fields of the event (``wiki``, ``type``, ``namespace``)
+    instead of guessing from the title: namespace 0 is the article namespace in
+    every language, and ``type`` separates real edits from categorisation and
+    log events. An empty set means "accept any value".
+    """
+
+    wikis: FrozenSet[str] = frozenset({"enwiki"})
+    types: FrozenSet[str] = frozenset({"edit", "new"})
+    namespaces: FrozenSet[int] = frozenset({0})
+
+    @classmethod
+    def from_settings(cls, wikis: str, types: str, namespaces: str) -> "ChangeFilter":
+        return cls(
+            wikis=parse_csv_setting(wikis),
+            types=parse_csv_setting(types),
+            namespaces=frozenset(int(ns) for ns in parse_csv_setting(namespaces)),
+        )
+
+    def accepts(self, change: Dict[str, Any]) -> bool:
+        """Pure-Python twin of the Spark filter, used by the offline tools and tests."""
+        if change.get("bot") or change.get("minor"):
+            return False
+        if self.wikis and change.get("wiki") not in self.wikis:
+            return False
+        if self.types and change.get("type") not in self.types:
+            return False
+        if self.namespaces and change.get("namespace") not in self.namespaces:
+            return False
+        return True
+
+
+def burst_score(label: Any, editors: int, edits: int, bytes_added: int = 0) -> float:
+    """
+    Newsworthiness score of an editing burst on one article.
+
+    Distinct editors dominate: several people editing the same article at once is
+    the classic breaking-news signal, while one person saving many times is not.
+    Edit volume and added content add a bounded bonus, and the title quality
+    adjustment demotes generic or maintenance topics.
+    """
+    score = 3.0 * editors + 0.5 * min(edits, 30) + min(max(bytes_added, 0) / 2000.0, 3.0)
+    return score + label_quality_bonus(label)
+
+
+def rank_bursts(topics: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order burst candidates by score, then editors, edits and label length."""
+    return sorted(
+        topics,
+        key=lambda item: (item["score"], item["editors"], item["count"], len(item["label"])),
+        reverse=True,
+    )
+
+
+def label_quality_bonus(label: Any) -> float:
+    """Title heuristics: specific, proper-noun titles beat generic or maintenance ones."""
     raw_label = str(label or "").strip()
     normalized = re.sub(r"\s+", " ", raw_label.lower())
     tokens = [token for token in re.split(r"[^\wÀ-ÿ]+", raw_label) if token]
 
-    score = float(count)
-    if mode == "title_exact":
-        score += 4.0
-    else:
-        score -= 1.5
-
+    score = 0.0
     if len(tokens) >= 2:
         score += 2.0
     if any(char.isdigit() for char in raw_label):

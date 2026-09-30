@@ -21,6 +21,7 @@ from pyspark.sql.types import ArrayType, BooleanType, DoubleType, LongType, Stri
 
 from common.editorial_common import contains_foreign_script, resolve_display_topic_label, resolve_source_label
 from common.spark_common import MINIO_BUCKET, create_spark_session, wait_for_delta_source
+from common.wiki_context import build_topic_context, is_grounded, render_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("wiki-gold")
@@ -45,6 +46,9 @@ GOLD_TOKEN_JACCARD_THRESHOLD = float(os.getenv("GOLD_TOKEN_JACCARD_THRESHOLD", "
 GOLD_MIN_UPDATE_INTERVAL_MINUTES = int(os.getenv("GOLD_MIN_UPDATE_INTERVAL_MINUTES", "45"))
 GOLD_MIN_TOPIC_COUNT_DELTA = int(os.getenv("GOLD_MIN_TOPIC_COUNT_DELTA", "5"))
 GOLD_STORY_STALE_HOURS = int(os.getenv("GOLD_STORY_STALE_HOURS", "12"))
+GOLD_WIKI_CONTEXT_ENABLED = os.getenv("GOLD_WIKI_CONTEXT_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+GOLD_CONTEXT_MAX_DIFFS = int(os.getenv("GOLD_CONTEXT_MAX_DIFFS", "3"))
+GOLD_CONTEXT_MAX_CHARS = int(os.getenv("GOLD_CONTEXT_MAX_CHARS", "1500"))
 GOLD_TOKEN_MIN_LEN = int(os.getenv("GOLD_TOKEN_MIN_LEN", "4"))
 STOPWORDS = {
     word.strip().lower()
@@ -117,11 +121,31 @@ SYSTEM_PROMPT = (
     "Do not add text before or after. Do not use markdown."
 )
 
+# Sent as Ollama's ``format`` so the model is constrained to this shape (structured outputs)
+NEWS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "topic_label": {"type": "string"},
+        "headline": {"type": "string"},
+        "summary": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["topic_label", "headline", "summary", "tags"],
+}
+
+FACT_RULES = (
+    "FACT RULES:\n"
+    "- Base every factual claim on the article context and the added text above; edit comments are only hints.\n"
+    "- If they do not say what happened, do not guess an event: report that the article is drawing a surge of edits "
+    "and explain who or what the subject is using the article context.\n"
+)
+
 GOLD_SCHEMA = StructType(
     [
         StructField("topic_term", StringType(), True),
         StructField("topic_label", StringType(), True),
         StructField("topic_event_count", LongType(), True),
+        StructField("topic_editor_count", LongType(), True),
         StructField("event_id", LongType(), True),
         StructField("event_meta_id", StringType(), True),
         StructField("domain", StringType(), True),
@@ -137,6 +161,7 @@ GOLD_SCHEMA = StructType(
         StructField("tags", ArrayType(StringType()), True),
         StructField("inference_ok", BooleanType(), False),
         StructField("inference_error", StringType(), True),
+        StructField("grounded", BooleanType(), True),
         StructField("dedup_score", DoubleType(), True),
         StructField("is_update", BooleanType(), False),
         StructField("duplicate_of_gold_ts", StringType(), True),
@@ -199,7 +224,13 @@ def enforce_human_framing(
     headline: str,
     summary: str,
     tags: List[str],
-) -> Tuple[str, str, str, List[str]]:
+) -> Tuple[str, str, str, List[str], List[str]]:
+    """
+    Apply the editorial guardrails. Returns the cleaned fields plus the list of
+    issues that forced a templated headline or summary (empty when the model's
+    own text survived), so callers can refuse to publish templated stories.
+    """
+    issues: List[str] = []
     anchor = pick_story_anchor(topic_term, samples)
     if contains_foreign_script(anchor):
         anchor = "a key protagonist"
@@ -218,9 +249,17 @@ def enforce_human_framing(
     )
 
     if not clean_headline or starts_with_abstract_prefix(clean_headline) or misleading_agency:
+        issues.append(
+            "headline: empty"
+            if not clean_headline
+            else "headline: platform edit as the subject"
+            if misleading_agency
+            else "headline: abstract opening"
+        )
         clean_headline = truncate_words(f"{anchor} returns to focus after new updates", 10)
 
     if contains_foreign_script(clean_headline):
+        issues.append("headline: non-Latin script")
         clean_headline = "New relevant breaking update"
 
     summary_norm = normalize_brief_text(clean_summary)
@@ -232,23 +271,45 @@ def enforce_human_framing(
         or looks_robotic_summary
         or contains_foreign_script(clean_summary)
     ):
+        issues.append(
+            "summary: empty"
+            if not clean_summary
+            else "summary: non-Latin script"
+            if contains_foreign_script(clean_summary)
+            else "summary: collective or robotic phrasing"
+        )
         clean_summary = (
             f"Recent changes linked to {anchor} have been registered. "
             "The update gains informative relevance at this time."
         )
 
     clean_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
-    return clean_topic_label, clean_headline, clean_summary, (clean_tags or ["news"])
+    return clean_topic_label, clean_headline, clean_summary, (clean_tags or ["news"]), issues
 
 
-def build_topic_prompt(topic_term: str, topic_event_count: int, samples: List[Dict[str, str]]) -> str:
-    sample_lines = [
+def _sample_line(sample: Dict[str, Any]) -> str:
+    line = (
         f"- title: {sample.get('title', '')} | comment: {sample.get('comment', '')} "
         f"| domain: {sample.get('domain', '')}"
-        for sample in samples
-    ]
+    )
+    if sample.get("byte_delta") is not None:
+        line += f" | size change: {int(sample['byte_delta']):+d} bytes"
+    return line
+
+
+def build_topic_prompt(
+    topic_term: str,
+    topic_event_count: int,
+    samples: List[Dict[str, Any]],
+    context: Optional[Dict[str, Any]] = None,
+    editor_count: Optional[int] = None,
+) -> str:
+    sample_lines = [_sample_line(sample) for sample in samples]
     context_block = "\n".join(sample_lines) if sample_lines else "- no samples"
     source_label = resolve_source_label(samples)
+    editors_line = f"Distinct editors: {int(editor_count)}\n" if editor_count else ""
+    facts = render_context(context)
+    facts_block = f"{facts}{FACT_RULES}\n" if facts else ""
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         "You receive a topic already curated by the analytical layer. Write a human news story focused on a specific "
@@ -256,8 +317,10 @@ def build_topic_prompt(topic_term: str, topic_event_count: int, samples: List[Di
         f"Predominant source project: {source_label}\n"
         f"Recurring topic: {topic_term}\n"
         f"Related events: {topic_event_count}\n"
+        f"{editors_line}"
         "Sample changes:\n"
         f"{context_block}\n\n"
+        f"{facts_block}"
         "The headline must start with the main protagonist (person, team, mission, institution, work, or specific "
         "place).\n"
         "Forbidden to open with collective or technical approaches like 'Update', 'Several articles', 'Trend', or "
@@ -290,7 +353,7 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 def normalize_model_output(payload: Dict[str, Any]) -> Tuple[str, str, str, List[str]]:
     topic_label = str(payload.get("topic_label", "")).strip()
     headline = str(payload.get("headline", "")).strip()
-    summary = str(payload.get("summary", "")).strip() or "Could not generate an automatic summary for this event."
+    summary = str(payload.get("summary", "")).strip()
     tags_raw = payload.get("tags", [])
     if isinstance(tags_raw, list):
         tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()]
@@ -306,7 +369,9 @@ def call_ollama(
 ) -> Tuple[str, str, str, List[str], bool, Optional[str]]:
     request = Request(
         f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
-        data=json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"}).encode("utf-8"),
+        data=json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": NEWS_JSON_SCHEMA}).encode(
+            "utf-8"
+        ),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -318,9 +383,12 @@ def call_ollama(
         topic_label, headline, summary, tags = normalize_model_output(
             extract_json_object(str(response_obj.get("response", "")).strip())
         )
-        topic_label, headline, summary, tags = enforce_human_framing(
+        topic_label, headline, summary, tags, issues = enforce_human_framing(
             topic_term, samples, topic_label, headline, summary, tags
         )
+        if issues:
+            # A templated headline or summary is not the model's story: keep it out of the front page
+            return topic_label, headline, summary, tags, False, "Rejected by editorial guardrails: " + "; ".join(issues)
         combined = " ".join([topic_label, headline, summary, " ".join(tags)]).strip()
         if contains_foreign_script(combined):
             raise ValueError("The model's response was not completely in English")
@@ -328,7 +396,7 @@ def call_ollama(
     # OSError covers URLError, timeouts and dropped connections; ValueError covers bad JSON.
     # Any of them yields a fallback story instead of failing the whole micro-batch.
     except (OSError, ValueError) as exc:
-        topic_label, headline, summary, tags = enforce_human_framing(
+        topic_label, headline, summary, tags, _ = enforce_human_framing(
             topic_term,
             samples,
             "",
@@ -610,8 +678,20 @@ def main() -> None:
                 continue
 
             samples = json.loads(row["samples_json"] or "[]")
+            editor_count = row.asDict().get("topic_editor_count")
+            context = (
+                build_topic_context(samples, GOLD_CONTEXT_MAX_DIFFS, GOLD_CONTEXT_MAX_CHARS)
+                if GOLD_WIKI_CONTEXT_ENABLED
+                else None
+            )
             translated_topic_label, headline, summary, tags, inference_ok, inference_error = call_ollama(
-                build_topic_prompt(row["topic_term"], int(row["topic_event_count"] or 0), samples),
+                build_topic_prompt(
+                    row["topic_term"],
+                    int(row["topic_event_count"] or 0),
+                    samples,
+                    context=context,
+                    editor_count=editor_count,
+                ),
                 row["topic_term"],
                 samples,
             )
@@ -642,6 +722,7 @@ def main() -> None:
                     "topic_term": row["topic_term"],
                     "topic_label": topic_label,
                     "topic_event_count": int(row["topic_event_count"] or 0),
+                    "topic_editor_count": int(editor_count) if editor_count is not None else None,
                     "event_id": row["event_id"],
                     "event_meta_id": row["event_meta_id"],
                     "domain": row["domain"],
@@ -657,6 +738,7 @@ def main() -> None:
                     "tags": tags,
                     "inference_ok": inference_ok,
                     "inference_error": inference_error,
+                    "grounded": is_grounded(context),
                     "dedup_score": float(dedup_score),
                     "is_update": bool(is_update),
                     "duplicate_of_gold_ts": duplicate_of_gold_ts,
